@@ -321,7 +321,16 @@ int ouichefs_fill_super(struct super_block *sb, void *data, int silent)
 		brelse(bh);
 	}
 
-	/* Create root inode */
+	/* 
+	 * Create root inode.
+	 *
+	 * 1 is used instead of 0 to stay compatible with userspace applications,
+	 * as this is the "de facto standard".
+	 *
+	 * See:
+	 * - https://github.com/rgouicem/ouichefs/commit/296e162
+	 * - https://github.com/rgouicem/ouichefs/pull/23
+	 */
 	root_inode = ouichefs_iget(sb, 1);
 	if (IS_ERR(root_inode)) {
 		ret = PTR_ERR(root_inode);
