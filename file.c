@@ -55,9 +55,9 @@ static int ouichefs_file_get_block(struct inode *inode, sector_t iblock,
 			ret = -ENOSPC;
 			goto brelse_index;
 		}
-		index->blocks[iblock] = bno;
+		index->blocks[iblock] = cpu_to_le32(bno);
 	} else {
-		bno = index->blocks[iblock];
+		bno = le32_to_cpu(index->blocks[iblock]);
 	}
 
 	/* Map the physical block to the given buffer_head */
@@ -174,7 +174,7 @@ static int ouichefs_write_end(struct file *file, struct address_space *mapping,
 
 			for (i = inode->i_blocks - 1; i < nr_blocks_old - 1;
 			     i++) {
-				put_block(OUICHEFS_SB(sb), index->blocks[i]);
+				put_block(OUICHEFS_SB(sb), le32_to_cpu(index->blocks[i]));
 				index->blocks[i] = 0;
 			}
 			mark_buffer_dirty(bh_index);
@@ -212,7 +212,7 @@ static int ouichefs_open(struct inode *inode, struct file *file) {
 		index = (struct ouichefs_file_index_block *)bh_index->b_data;
 
 		for (iblock = 0; index->blocks[iblock] != 0; iblock++) {
-			put_block(sbi, index->blocks[iblock]);
+			put_block(sbi, le32_to_cpu(index->blocks[iblock]));
 			index->blocks[iblock] = 0;
 		}
 		inode->i_size = 0;
