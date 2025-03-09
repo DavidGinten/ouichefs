@@ -256,15 +256,15 @@ int ouichefs_fill_super(struct super_block *sb, void *data, int silent)
 	/* Check magic number */
 	if (csb->magic != sb->s_magic) {
 		pr_err("Wrong magic number\n");
-		ret = -EPERM;
-		goto release;
+		brelse(bh);
+		return -EPERM;
 	}
 
 	/* Alloc sb_info */
 	sbi = kzalloc(sizeof(struct ouichefs_sb_info), GFP_KERNEL);
 	if (!sbi) {
-		ret = -ENOMEM;
-		goto release;
+		brelse(bh);
+		return -ENOMEM;
 	}
 	sbi->nr_blocks = csb->nr_blocks;
 	sbi->nr_inodes = csb->nr_inodes;
@@ -331,21 +331,17 @@ int ouichefs_fill_super(struct super_block *sb, void *data, int silent)
 	sb->s_root = d_make_root(root_inode);
 	if (!sb->s_root) {
 		ret = -ENOMEM;
-		goto iput;
+		goto free_bfree;
 	}
 
 	return 0;
 
-iput:
-	iput(root_inode);
 free_bfree:
 	kfree(sbi->bfree_bitmap);
 free_ifree:
 	kfree(sbi->ifree_bitmap);
 free_sbi:
 	kfree(sbi);
-release:
-	brelse(bh);
 
 	return ret;
 }
