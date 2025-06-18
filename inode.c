@@ -131,10 +131,6 @@ static struct dentry *ouichefs_lookup(struct inode *dir, struct dentry *dentry,
 	}
 	brelse(bh);
 
-	/* Update directory access time */
-	dir->i_atime = current_time(dir);
-	mark_inode_dirty(dir);
-
 	/* Fill the dentry with the inode */
 	d_add(dentry, inode);
 
@@ -190,13 +186,12 @@ static struct inode *ouichefs_new_inode(struct inode *dir, mode_t mode)
 	if (S_ISDIR(mode)) {
 		inode->i_size = OUICHEFS_BLOCK_SIZE;
 		inode->i_fop = &ouichefs_dir_ops;
-		set_nlink(inode, 2); /* . and .. */
 	} else if (S_ISREG(mode)) {
 		inode->i_size = 0;
 		inode->i_fop = &ouichefs_file_ops;
 		inode->i_mapping->a_ops = &ouichefs_aops;
-		set_nlink(inode, 1);
 	}
+	set_nlink(inode, 1);
 
 	inode->i_ctime = inode->i_atime = inode->i_mtime = current_time(inode);
 
@@ -279,7 +274,7 @@ static int ouichefs_create(struct mnt_idmap *idmap, struct inode *dir,
 
 	/* Update stats and mark dir and new inode dirty */
 	mark_inode_dirty(inode);
-	dir->i_mtime = dir->i_atime = dir->i_ctime = current_time(dir);
+	dir->i_mtime = dir->i_ctime = current_time(dir);
 	if (S_ISDIR(mode))
 		inode_inc_link_count(dir);
 	mark_inode_dirty(dir);
@@ -343,7 +338,7 @@ static int ouichefs_unlink(struct inode *dir, struct dentry *dentry)
 	brelse(bh);
 
 	/* Update inode stats */
-	dir->i_mtime = dir->i_atime = dir->i_ctime = current_time(dir);
+	dir->i_mtime = dir->i_ctime = current_time(dir);
 	if (S_ISDIR(inode->i_mode))
 		inode_dec_link_count(dir);
 	mark_inode_dirty(dir);
@@ -366,20 +361,22 @@ static int ouichefs_unlink(struct inode *dir, struct dentry *dentry)
 		if (!file_block->blocks[i])
 			continue;
 
-		put_block(sbi, le32_to_cpu(file_block->blocks[i]));
-		bh2 = sb_bread(sb, le32_to_cpu(file_block->blocks[i]));
+    bh2 = sb_bread(sb, le32_to_cpu(file_block->blocks[i]));
 		if (!bh2)
-			continue;
+			goto put_block;
 		block = (char *)bh2->b_data;
 		memset(block, 0, OUICHEFS_BLOCK_SIZE);
 		mark_buffer_dirty(bh2);
 		brelse(bh2);
+put_block:
+		put_block(sbi, le32_to_cpu(file_block->blocks[i]));
 	}
 
 scrub:
 	/* Scrub index block */
 	memset(file_block, 0, OUICHEFS_BLOCK_SIZE);
 	mark_buffer_dirty(bh);
+	sync_dirty_buffer(bh);
 	brelse(bh);
 
 clean_inode:
@@ -392,8 +389,8 @@ clean_inode:
 	inode->i_mode = 0;
 	inode->i_ctime.tv_sec = inode->i_mtime.tv_sec = inode->i_atime.tv_sec =
 		0;
-	inode->i_ctime.tv_nsec = inode->i_mtime.tv_nsec = inode->i_atime.tv_nsec =
-		0;
+	inode->i_ctime.tv_nsec = inode->i_mtime.tv_nsec =
+		inode->i_atime.tv_nsec = 0;
 	inode_dec_link_count(inode);
 	mark_inode_dirty(inode);
 
@@ -498,8 +495,7 @@ static int ouichefs_rename(struct mnt_idmap *idmap, struct inode *old_dir,
 	brelse(bh_old);
 
 	/* Update old parent inode metadata */
-	old_dir->i_atime = old_dir->i_ctime = old_dir->i_mtime =
-		current_time(old_dir);
+	old_dir->i_ctime = old_dir->i_mtime = current_time(old_dir);
 	if (S_ISDIR(src->i_mode))
 		inode_dec_link_count(old_dir);
 	mark_inode_dirty(old_dir);

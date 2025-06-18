@@ -56,6 +56,7 @@ static int ouichefs_file_get_block(struct inode *inode, sector_t iblock,
 			goto brelse_index;
 		}
 		index->blocks[iblock] = cpu_to_le32(bno);
+		mark_buffer_dirty(bh_index);
 	} else {
 		bno = le32_to_cpu(index->blocks[iblock]);
 	}
@@ -146,9 +147,9 @@ static int ouichefs_write_end(struct file *file, struct address_space *mapping,
 		uint32_t nr_blocks_old = inode->i_blocks;
 
 		/* Update inode metadata */
-		inode->i_blocks = (inode->i_size / OUICHEFS_BLOCK_SIZE) + 1;
-		if ((inode->i_size % OUICHEFS_BLOCK_SIZE) != 0)
-			inode->i_blocks++;
+		inode->i_blocks = (roundup(inode->i_size, OUICHEFS_BLOCK_SIZE) /
+				   OUICHEFS_BLOCK_SIZE) +
+				  1;
 		inode->i_mtime = inode->i_ctime = current_time(inode);
 		mark_inode_dirty(inode);
 
@@ -192,7 +193,8 @@ const struct address_space_operations ouichefs_aops = {
 	.write_end = ouichefs_write_end
 };
 
-static int ouichefs_open(struct inode *inode, struct file *file) {
+static int ouichefs_open(struct inode *inode, struct file *file)
+{
 	bool wronly = (file->f_flags & O_WRONLY) != 0;
 	bool rdwr = (file->f_flags & O_RDWR) != 0;
 	bool trunc = (file->f_flags & O_TRUNC) != 0;
@@ -218,9 +220,10 @@ static int ouichefs_open(struct inode *inode, struct file *file) {
 		inode->i_size = 0;
 		inode->i_blocks = 1;
 
+		mark_buffer_dirty(bh_index);
 		brelse(bh_index);
 	}
-	
+
 	return 0;
 }
 
@@ -229,5 +232,6 @@ const struct file_operations ouichefs_file_ops = {
 	.open = ouichefs_open,
 	.llseek = generic_file_llseek,
 	.read_iter = generic_file_read_iter,
-	.write_iter = generic_file_write_iter
+	.write_iter = generic_file_write_iter,
+	.fsync = generic_file_fsync,
 };

@@ -68,4 +68,5 @@ static int ouichefs_iterate(struct file *dir, struct dir_context *ctx)
 const struct file_operations ouichefs_dir_ops = {
 	.owner = THIS_MODULE,
 	.iterate_shared = ouichefs_iterate,
+	.fsync = generic_file_fsync,
 };
