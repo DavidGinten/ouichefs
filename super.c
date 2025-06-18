@@ -79,8 +79,11 @@ static int ouichefs_write_inode(struct inode *inode,
 	disk_inode->i_gid = i_gid_read(inode);
 	disk_inode->i_size = inode->i_size;
 	disk_inode->i_ctime = inode->i_ctime.tv_sec;
+	disk_inode->i_nctime = inode->i_ctime.tv_nsec;
 	disk_inode->i_atime = inode->i_atime.tv_sec;
+	disk_inode->i_natime = inode->i_atime.tv_nsec;
 	disk_inode->i_mtime = inode->i_mtime.tv_sec;
+	disk_inode->i_nmtime = inode->i_mtime.tv_nsec;
 	disk_inode->i_blocks = inode->i_blocks;
 	disk_inode->i_nlink = inode->i_nlink;
 	disk_inode->index_block = ci->index_block;
@@ -212,7 +215,7 @@ static int ouichefs_statfs(struct dentry *dentry, struct kstatfs *stat)
 	stat->f_blocks = sbi->nr_blocks;
 	stat->f_bfree = sbi->nr_free_blocks;
 	stat->f_bavail = sbi->nr_free_blocks;
-	stat->f_files = sbi->nr_inodes - sbi->nr_free_inodes;
+	stat->f_files = sbi->nr_inodes;
 	stat->f_ffree = sbi->nr_free_inodes;
 	stat->f_namelen = OUICHEFS_FILENAME_LEN;
 
@@ -242,6 +245,7 @@ int ouichefs_fill_super(struct super_block *sb, void *data, int silent)
 	sb_set_blocksize(sb, OUICHEFS_BLOCK_SIZE);
 	sb->s_maxbytes = OUICHEFS_MAX_FILESIZE;
 	sb->s_op = &ouichefs_super_ops;
+	sb->s_time_gran = 1;
 
 	/* Read sb from disk */
 	bh = sb_bread(sb, OUICHEFS_SB_BLOCK_NR);
@@ -252,15 +256,15 @@ int ouichefs_fill_super(struct super_block *sb, void *data, int silent)
 	/* Check magic number */
 	if (csb->magic != sb->s_magic) {
 		pr_err("Wrong magic number\n");
-		ret = -EPERM;
-		goto release;
+		brelse(bh);
+		return -EPERM;
 	}
 
 	/* Alloc sb_info */
 	sbi = kzalloc(sizeof(struct ouichefs_sb_info), GFP_KERNEL);
 	if (!sbi) {
-		ret = -ENOMEM;
-		goto release;
+		brelse(bh);
+		return -ENOMEM;
 	}
 	sbi->nr_blocks = csb->nr_blocks;
 	sbi->nr_inodes = csb->nr_inodes;
@@ -317,8 +321,17 @@ int ouichefs_fill_super(struct super_block *sb, void *data, int silent)
 		brelse(bh);
 	}
 
-	/* Create root inode */
-	root_inode = ouichefs_iget(sb, 0);
+	/* 
+	 * Create root inode.
+	 *
+	 * 1 is used instead of 0 to stay compatible with userspace applications,
+	 * as this is the "de facto standard".
+	 *
+	 * See:
+	 * - https://github.com/rgouicem/ouichefs/commit/296e162
+	 * - https://github.com/rgouicem/ouichefs/pull/23
+	 */
+	root_inode = ouichefs_iget(sb, 1);
 	if (IS_ERR(root_inode)) {
 		ret = PTR_ERR(root_inode);
 		goto free_bfree;
@@ -327,21 +340,17 @@ int ouichefs_fill_super(struct super_block *sb, void *data, int silent)
 	sb->s_root = d_make_root(root_inode);
 	if (!sb->s_root) {
 		ret = -ENOMEM;
-		goto iput;
+		goto free_bfree;
 	}
 
 	return 0;
 
-iput:
-	iput(root_inode);
 free_bfree:
 	kfree(sbi->bfree_bitmap);
 free_ifree:
 	kfree(sbi->ifree_bitmap);
 free_sbi:
 	kfree(sbi);
-release:
-	brelse(bh);
 
 	return ret;
 }

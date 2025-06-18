@@ -62,11 +62,11 @@ struct inode *ouichefs_iget(struct super_block *sb, unsigned long ino)
 	i_gid_write(inode, le32_to_cpu(cinode->i_gid));
 	inode->i_size = le32_to_cpu(cinode->i_size);
 	inode->i_ctime.tv_sec = (time64_t)le32_to_cpu(cinode->i_ctime);
-	inode->i_ctime.tv_nsec = 0;
+	inode->i_ctime.tv_nsec = (long)le64_to_cpu(cinode->i_nctime);
 	inode->i_atime.tv_sec = (time64_t)le32_to_cpu(cinode->i_atime);
-	inode->i_atime.tv_nsec = 0;
+	inode->i_atime.tv_nsec = (long)le64_to_cpu(cinode->i_natime);
 	inode->i_mtime.tv_sec = (time64_t)le32_to_cpu(cinode->i_mtime);
-	inode->i_mtime.tv_nsec = 0;
+	inode->i_mtime.tv_nsec = (long)le64_to_cpu(cinode->i_nmtime);
 	inode->i_blocks = le32_to_cpu(cinode->i_blocks);
 	set_nlink(inode, le32_to_cpu(cinode->i_nlink));
 
@@ -130,10 +130,6 @@ static struct dentry *ouichefs_lookup(struct inode *dir, struct dentry *dentry,
 		}
 	}
 	brelse(bh);
-
-	/* Update directory access time */
-	dir->i_atime = current_time(dir);
-	mark_inode_dirty(dir);
 
 	/* Fill the dentry with the inode */
 	d_add(dentry, inode);
@@ -279,7 +275,7 @@ static int ouichefs_create(struct mnt_idmap *idmap, struct inode *dir,
 
 	/* Update stats and mark dir and new inode dirty */
 	mark_inode_dirty(inode);
-	dir->i_mtime = dir->i_atime = dir->i_ctime = current_time(dir);
+	dir->i_mtime = dir->i_ctime = current_time(dir);
 	if (S_ISDIR(mode))
 		inode_inc_link_count(dir);
 	mark_inode_dirty(dir);
@@ -343,7 +339,7 @@ static int ouichefs_unlink(struct inode *dir, struct dentry *dentry)
 	brelse(bh);
 
 	/* Update inode stats */
-	dir->i_mtime = dir->i_atime = dir->i_ctime = current_time(dir);
+	dir->i_mtime = dir->i_ctime = current_time(dir);
 	if (S_ISDIR(inode->i_mode))
 		inode_dec_link_count(dir);
 	mark_inode_dirty(dir);
@@ -392,6 +388,8 @@ clean_inode:
 	inode->i_mode = 0;
 	inode->i_ctime.tv_sec = inode->i_mtime.tv_sec = inode->i_atime.tv_sec =
 		0;
+	inode->i_ctime.tv_nsec = inode->i_mtime.tv_nsec =
+		inode->i_atime.tv_nsec = 0;
 	inode_dec_link_count(inode);
 	mark_inode_dirty(inode);
 
@@ -496,8 +494,7 @@ static int ouichefs_rename(struct mnt_idmap *idmap, struct inode *old_dir,
 	brelse(bh_old);
 
 	/* Update old parent inode metadata */
-	old_dir->i_atime = old_dir->i_ctime = old_dir->i_mtime =
-		current_time(old_dir);
+	old_dir->i_ctime = old_dir->i_mtime = current_time(old_dir);
 	if (S_ISDIR(src->i_mode))
 		inode_dec_link_count(old_dir);
 	mark_inode_dirty(old_dir);

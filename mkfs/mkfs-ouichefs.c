@@ -25,9 +25,12 @@ struct ouichefs_inode {
 	uint32_t i_uid; /* Owner id */
 	uint32_t i_gid; /* Group id */
 	uint32_t i_size; /* Size in bytes */
-	uint32_t i_ctime; /* Inode change time */
-	uint32_t i_atime; /* Access time */
-	uint32_t i_mtime; /* Modification time */
+	uint32_t i_ctime; /* Inode change time (sec)*/
+	uint64_t i_nctime; /* Inode change time (nsec) */
+	uint32_t i_atime; /* Access time (sec) */
+	uint64_t i_natime; /* Access time (nsec) */
+	uint32_t i_mtime; /* Modification time (sec) */
+	uint64_t i_nmtime; /* Modification time (nsec) */
 	uint32_t i_blocks; /* Block count (subdir count for directories) */
 	uint32_t i_nlink; /* Hard links count */
 	uint32_t index_block; /* Block with list of blocks for this file */
@@ -149,8 +152,8 @@ static int write_inode_store(int fd, struct ouichefs_superblock *sb)
 		return -1;
 	memset(block, 0, OUICHEFS_BLOCK_SIZE);
 
-	/* Root inode (inode 0) */
-	inode = (struct ouichefs_inode *)block;
+	/* Root inode (inode 1) */
+	inode = (struct ouichefs_inode *)block + 1;
 	first_data_block = 1 + le32toh(sb->nr_bfree_blocks) +
 			   le32toh(sb->nr_ifree_blocks) +
 			   le32toh(sb->nr_istore_blocks);
@@ -161,6 +164,7 @@ static int write_inode_store(int fd, struct ouichefs_superblock *sb)
 	inode->i_gid = 0;
 	inode->i_size = htole32(OUICHEFS_BLOCK_SIZE);
 	inode->i_ctime = inode->i_atime = inode->i_mtime = htole32(0);
+	inode->i_nctime = inode->i_natime = inode->i_nmtime = htole64(0);
 	inode->i_blocks = htole32(1);
 	inode->i_nlink = htole32(2);
 	inode->index_block = htole32(first_data_block);
@@ -207,7 +211,7 @@ static int write_ifree_blocks(int fd, struct ouichefs_superblock *sb)
 	memset(ifree, 0xff, OUICHEFS_BLOCK_SIZE);
 
 	/* First ifree block, containing first used inode */
-	ifree[0] = htole64(0xfffffffffffffffe);
+	ifree[0] = htole64(0xfffffffffffffffc);
 	ret = write(fd, ifree, OUICHEFS_BLOCK_SIZE);
 	if (ret != OUICHEFS_BLOCK_SIZE) {
 		ret = -1;
@@ -289,6 +293,30 @@ end:
 	return ret;
 }
 
+static int write_root_index_block(int fd, struct ouichefs_superblock *sb)
+{
+	int ret = 0;
+	char *block;
+
+	block = malloc(OUICHEFS_BLOCK_SIZE);
+	if (!block)
+		return -1;
+	memset(block, 0, OUICHEFS_BLOCK_SIZE);
+
+	ret = write(fd, block, OUICHEFS_BLOCK_SIZE);
+	if (ret != OUICHEFS_BLOCK_SIZE) {
+		ret = -1;
+		goto end;
+	}
+	ret = 0;
+
+	printf("Root index block: wrote 1 block\n");
+end:
+	free(block);
+
+	return ret;
+}
+
 static int write_data_blocks(int fd, struct ouichefs_superblock *sb)
 {
 	int ret = 0;
@@ -333,7 +361,7 @@ int main(int argc, char **argv)
 	struct stat stat_buf;
 	struct ouichefs_superblock *sb = NULL;
 
-	if (argc != 2) {
+	if (argc != 2 || argv[1][0] == '-') {
 		usage(argv[0]);
 		return EXIT_FAILURE;
 	}
@@ -341,14 +369,14 @@ int main(int argc, char **argv)
 	/* Open disk partition */
 	fd = open(argv[1], O_RDWR);
 	if (fd == -1) {
-		perror("open():");
+		perror("open()");
 		return EXIT_FAILURE;
 	}
 
 	/* Get partition size */
 	ret = fstat(fd, &stat_buf);
 	if (ret != 0) {
-		perror("fstat():");
+		perror("fstat()");
 		ret = EXIT_FAILURE;
 		goto fclose;
 	}
@@ -367,7 +395,7 @@ int main(int argc, char **argv)
 
 	/* Check if partition is large enough */
 	min_size = 100 * OUICHEFS_BLOCK_SIZE;
-	if (partition_size <= min_size) {
+	if (partition_size < min_size) {
 		fprintf(stderr,
 			"File is not large enough (size=%ld, min size=%ld)\n",
 			stat_buf.st_size, min_size);
@@ -378,7 +406,7 @@ int main(int argc, char **argv)
 	/* Write superblock (block 0) */
 	sb = write_superblock(fd, partition_size);
 	if (!sb) {
-		perror("write_superblock():");
+		perror("write_superblock()");
 		ret = EXIT_FAILURE;
 		goto fclose;
 	}
@@ -386,7 +414,7 @@ int main(int argc, char **argv)
 	/* Write inode store blocks (from block 1) */
 	ret = write_inode_store(fd, sb);
 	if (ret != 0) {
-		perror("write_inode_store():");
+		perror("write_inode_store()");
 		ret = EXIT_FAILURE;
 		goto free_sb;
 	}
@@ -407,10 +435,18 @@ int main(int argc, char **argv)
 		goto free_sb;
 	}
 
+	/* Write the root index block */
+	ret = write_root_index_block(fd, sb);
+	if (ret != 0) {
+		perror("write_root_index_block()");
+		ret = EXIT_FAILURE;
+		goto free_sb;
+	}
+
 	/* Write data blocks */
 	ret = write_data_blocks(fd, sb);
 	if (ret != 0) {
-		perror("write_data_blocks():");
+		perror("write_data_blocks()");
 		ret = EXIT_FAILURE;
 		goto free_sb;
 	}
