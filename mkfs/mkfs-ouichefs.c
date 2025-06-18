@@ -131,9 +131,11 @@ static struct ouichefs_superblock *write_superblock(int fd,
 	       "\tnr_bfree_blocks=%u\n"
 	       "\tnr_free_inodes=%u\n"
 	       "\tnr_free_blocks=%u\n",
-	       sizeof(struct ouichefs_superblock), sb->magic, sb->nr_blocks,
-	       sb->nr_inodes, sb->nr_istore_blocks, sb->nr_ifree_blocks,
-	       sb->nr_bfree_blocks, sb->nr_free_inodes, sb->nr_free_blocks);
+	       sizeof(struct ouichefs_superblock), le32toh(sb->magic),
+		   le32toh(sb->nr_blocks), le32toh(sb->nr_inodes),
+		   le32toh(sb->nr_istore_blocks),
+		   le32toh(sb->nr_ifree_blocks), le32toh(sb->nr_bfree_blocks),
+		   le32toh(sb->nr_free_inodes), le32toh(sb->nr_free_blocks));
 
 	return sb;
 }
@@ -177,7 +179,7 @@ static int write_inode_store(int fd, struct ouichefs_superblock *sb)
 
 	/* Reset inode store blocks to zero */
 	memset(block, 0, OUICHEFS_BLOCK_SIZE);
-	for (i = 1; i < sb->nr_istore_blocks; i++) {
+	for (i = 1; i < le32toh(sb->nr_istore_blocks); i++) {
 		ret = write(fd, block, OUICHEFS_BLOCK_SIZE);
 		if (ret != OUICHEFS_BLOCK_SIZE) {
 			ret = -1;
