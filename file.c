@@ -231,5 +231,6 @@ const struct file_operations ouichefs_file_ops = {
 	.open = ouichefs_open,
 	.llseek = generic_file_llseek,
 	.read_iter = generic_file_read_iter,
-	.write_iter = generic_file_write_iter
+	.write_iter = generic_file_write_iter,
+	.fsync = generic_file_fsync,
 };
