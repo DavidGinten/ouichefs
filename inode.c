@@ -376,6 +376,7 @@ scrub:
 	/* Scrub index block */
 	memset(file_block, 0, OUICHEFS_BLOCK_SIZE);
 	mark_buffer_dirty(bh);
+	sync_dirty_buffer(bh);
 	brelse(bh);
 
 clean_inode:
