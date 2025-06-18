@@ -186,13 +186,12 @@ static struct inode *ouichefs_new_inode(struct inode *dir, mode_t mode)
 	if (S_ISDIR(mode)) {
 		inode->i_size = OUICHEFS_BLOCK_SIZE;
 		inode->i_fop = &ouichefs_dir_ops;
-		set_nlink(inode, 2); /* . and .. */
 	} else if (S_ISREG(mode)) {
 		inode->i_size = 0;
 		inode->i_fop = &ouichefs_file_ops;
 		inode->i_mapping->a_ops = &ouichefs_aops;
-		set_nlink(inode, 1);
 	}
+	set_nlink(inode, 1);
 
 	inode->i_ctime = inode->i_atime = inode->i_mtime = current_time(inode);
 
