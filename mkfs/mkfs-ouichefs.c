@@ -349,14 +349,14 @@ int main(int argc, char **argv)
 	/* Open disk image */
 	fd = open(argv[1], O_RDWR);
 	if (fd == -1) {
-		perror("open():");
+		perror("open()");
 		return EXIT_FAILURE;
 	}
 
 	/* Get image size */
 	ret = fstat(fd, &stat_buf);
 	if (ret != 0) {
-		perror("fstat():");
+		perror("fstat()");
 		ret = EXIT_FAILURE;
 		goto fclose;
 	}
@@ -374,7 +374,7 @@ int main(int argc, char **argv)
 	/* Write superblock (block 0) */
 	sb = write_superblock(fd, &stat_buf);
 	if (!sb) {
-		perror("write_superblock():");
+		perror("write_superblock()");
 		ret = EXIT_FAILURE;
 		goto fclose;
 	}
@@ -382,7 +382,7 @@ int main(int argc, char **argv)
 	/* Write inode store blocks (from block 1) */
 	ret = write_inode_store(fd, sb);
 	if (ret != 0) {
-		perror("write_inode_store():");
+		perror("write_inode_store()");
 		ret = EXIT_FAILURE;
 		goto free_sb;
 	}
@@ -414,7 +414,7 @@ int main(int argc, char **argv)
 	/* Write data blocks */
 	ret = write_data_blocks(fd, sb);
 	if (ret != 0) {
-		perror("write_data_blocks():");
+		perror("write_data_blocks()");
 		ret = EXIT_FAILURE;
 		goto free_sb;
 	}
