@@ -5,6 +5,9 @@
  * Copyright (C) 2018 Redha Gouicem <redha.gouicem@lip6.fr>
  */
 
+#include <stddef.h>
+#include <stdio.h>
+#include <string.h>
 #define pr_fmt(fmt) "%s:%s: " fmt, KBUILD_MODNAME, __func__
 
 #include <linux/module.h>
@@ -32,6 +35,7 @@ static int ouichefs_file_get_block(struct inode *inode, sector_t iblock,
 	int ret = 0, bno;
 
 	/* If block number exceeds filesize, fail */
+	// Because one file has max. 1024 blocks
 	if (iblock >= OUICHEFS_BLOCK_SIZE >> 2)
 		return -EFBIG;
 
@@ -50,6 +54,8 @@ static int ouichefs_file_get_block(struct inode *inode, sector_t iblock,
 			ret = 0;
 			goto brelse_index;
 		}
+		// get_free_block returns an index and index->blocks[iblock]
+		// is now the reference to this newly allocated block
 		bno = get_free_block(sbi);
 		if (!bno) {
 			ret = -ENOSPC;
@@ -106,7 +112,7 @@ static int ouichefs_write_begin(struct file *file,
 	if (pos + len > OUICHEFS_MAX_FILESIZE)
 		return -ENOSPC;
 	nr_allocs = max(pos + len, file->f_inode->i_size) / OUICHEFS_BLOCK_SIZE;
-	if (nr_allocs > file->f_inode->i_blocks - 1)
+	if (nr_allocs > file->f_inode->i_blocks - 1) // Subtract the index block
 		nr_allocs -= file->f_inode->i_blocks - 1;
 	else
 		nr_allocs = 0;
@@ -227,11 +233,77 @@ static int ouichefs_open(struct inode *inode, struct file *file)
 	return 0;
 }
 
+static ssize_t ouichefs_read(struct file *file, char __user *buf, size_t len, loff_t *pos)
+{
+	struct inode *inode = file->f_inode;
+
+	if (*pos >= inode->i_size)
+		return 0;  // EOF: no more data to read
+
+	struct super_block *sb = inode->i_sb;
+	struct buffer_head *bh;
+	unsigned long block_num;
+	unsigned long block_offset;
+	unsigned long bytes_in_block;
+	unsigned long bytes_left;
+	unsigned long bytes_avail;
+	unsigned long to_copy;
+	size_t total_copied = 0;
+
+	char *kbuf = kmalloc(len, GFP_KERNEL);
+	if (!kbuf)
+		return -ENOMEM;
+
+	while (total_copied < len) {
+		block_num = *pos / OUICHEFS_BLOCK_SIZE;
+		block_offset = *pos % OUICHEFS_BLOCK_SIZE;
+
+		/* Get current block for reading data from disk */
+		// Use sb_bread and brelse to read data directly from the disk.
+		bh = sb_bread(sb, block_num);
+		if (!bh)
+			return -EIO;
+
+		bytes_in_block = OUICHEFS_BLOCK_SIZE - block_offset;
+		bytes_left = len - total_copied;
+		bytes_avail = inode->i_size - *pos;
+
+		to_copy = min3(bytes_in_block, bytes_left, bytes_avail);
+
+		memcpy(kbuf + total_copied, bh->b_data + block_offset, to_copy);
+
+		brelse(bh);
+
+		*pos += to_copy;
+		total_copied += to_copy;
+
+		if (*pos >= inode->i_size)
+			break;
+    }
+
+	if (copy_to_user(buf, kbuf, total_copied)) {
+		kfree(kbuf);
+		return -EFAULT;
+	}
+
+	kfree(kbuf);
+	// Return the amount of bytes that have been copied to userspace. 
+	return total_copied;
+}
+
+static ssize_t ouichefs_write(struct file *file, const char __user * buf, size_t len, loff_t * pos)
+{
+	// Use mark_buffer_dirty and sync_dirty_buffer functions to write data to the disk.
+}
+
 const struct file_operations ouichefs_file_ops = {
 	.owner = THIS_MODULE,
 	.open = ouichefs_open,
 	.llseek = generic_file_llseek,
-	.read_iter = generic_file_read_iter,
-	.write_iter = generic_file_write_iter,
+	.read = ouichefs_read,
+	.write = ouichefs_write,
+	// legacy functions -> remove later
+	//.read_iter = generic_file_read_iter,
+	//.write_iter = generic_file_write_iter,
 	.fsync = generic_file_fsync,
 };
