@@ -104,6 +104,15 @@ static inline void put_block(struct ouichefs_sb_info *sbi, uint32_t bno)
 	pr_debug("%s:%d: freed block %u\n", __func__, __LINE__, bno);
 }
 
+// The following two functions copy the little endian 64bit values
+// into the cpu's native endianness or vise versa. E.g. le64_to_cpu()
+// copies le values into the cpu's native endianness. 
+
+// A bitmap is copied per block (see super.c)
+// So this function copies one block of a bitmap
+// dst[i] = le64_to_cpu(src[i]); copies 64 bit (8Byte). In order
+// to fill the block of the dst we need 512 copies: 
+// 512 * 8 Bytes = 4096 Byte <-- Size of a block
 static inline void copy_bitmap_from_le64(unsigned long *dst, __le64 *src)
 {
 	int i;
