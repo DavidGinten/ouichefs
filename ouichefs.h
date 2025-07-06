@@ -114,7 +114,7 @@ extern const struct file_operations ouichefs_dir_ops;
 extern const struct address_space_operations ouichefs_aops;
 
 /* Getters for superbock and inode */
-	#define OUICHEFS_SB(sb) (sb->s_fs_info)
+#define OUICHEFS_SB(sb) (sb->s_fs_info)
 #define OUICHEFS_INODE(inode) \
 	(container_of(inode, struct ouichefs_inode_info, vfs_inode))
 

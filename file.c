@@ -5,9 +5,6 @@
  * Copyright (C) 2018 Redha Gouicem <redha.gouicem@lip6.fr>
  */
 
-#include <stddef.h>
-#include <stdio.h>
-#include <string.h>
 #define pr_fmt(fmt) "%s:%s: " fmt, KBUILD_MODNAME, __func__
 
 #include <linux/module.h>
@@ -293,6 +290,7 @@ static ssize_t ouichefs_read(struct file *file, char __user *buf, size_t len, lo
 
 static ssize_t ouichefs_write(struct file *file, const char __user * buf, size_t len, loff_t * pos)
 {
+	return 0;
 	// Use mark_buffer_dirty and sync_dirty_buffer functions to write data to the disk.
 }
 
