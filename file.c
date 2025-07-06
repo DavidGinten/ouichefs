@@ -18,7 +18,11 @@
 #include <linux/uio.h>
 
 MODULE_LICENSE("GPL");
-
+/*
+ * Map the buffer_head passed in argument with the iblock-th block of the file
+ * represented by inode. If the requested block is not allocated and create is
+ * true, allocate a new block on disk and map it.
+ */
 static int ouichefs_file_get_block(struct inode *inode, sector_t iblock,
 				   struct buffer_head *bh_result, int create)
 {
@@ -29,13 +33,20 @@ static int ouichefs_file_get_block(struct inode *inode, sector_t iblock,
 	struct buffer_head *bh_index;
 	int ret = 0, bno;
 
+	/* If block number exceeds filesize, fail */
 	if (iblock >= OUICHEFS_BLOCK_SIZE >> 2)
 		return -EFBIG;
 
+	/* Read index block from disk */
 	bh_index = sb_bread(sb, ci->index_block);
 	if (!bh_index)
 		return -EIO;
 	index = (struct ouichefs_file_index_block *)bh_index->b_data;
+
+	/*
+	 * Check if iblock is already allocated. If not and create is true,
+	 * allocate it. Else, get the physical block number.
+	 */
 
 	if (index->blocks[iblock] == 0) {
 		if (!create) {
@@ -52,7 +63,7 @@ static int ouichefs_file_get_block(struct inode *inode, sector_t iblock,
 	} else {
 		bno = le32_to_cpu(index->blocks[iblock]);
 	}
-
+	/* Map the physical block to the given buffer_head */
 	map_bh(bh_result, sb, bno);
 
 brelse_index:
@@ -60,15 +71,31 @@ brelse_index:
 	return ret;
 }
 
+/*
+ * Called by the page cache to read a page from the physical disk and map it in
+ * memory.
+ */
+
 static void ouichefs_readahead(struct readahead_control *rac)
 {
 	mpage_readahead(rac, ouichefs_file_get_block);
 }
 
+/*
+ * Called by the page cache to write a dirty page to the physical disk (when
+ * sync is called or when memory is needed).
+ */
+
 static int ouichefs_writepage(struct page *page, struct writeback_control *wbc)
 {
 	return block_write_full_page(page, ouichefs_file_get_block, wbc);
 }
+
+/*
+ * Called by the VFS when a write() syscall occurs on file before writing the
+ * data in the page cache. This functions checks if the write will be able to
+ * complete and allocates the necessary blocks through block_write_begin().
+ */
 
 static ssize_t ouichefs_write(struct kiocb *iocb, struct iov_iter *from)
 {
@@ -83,7 +110,8 @@ static ssize_t ouichefs_write(struct kiocb *iocb, struct iov_iter *from)
 	loff_t offset = iocb->ki_pos;
 	size_t count = iov_iter_count(from);
 	unsigned int block_size = sb->s_blocksize;
-
+	
+	/* Check if the write can be completed (enough space?) */
 	if (offset + count > OUICHEFS_MAX_FILESIZE)
 		return -ENOSPC;
 
