@@ -1,16 +1,17 @@
 obj-m += ouichefs.o
 ouichefs-objs := fs.o super.o inode.o file.o dir.o
 
-KERNELDIR ?= /lib/modules/$(shell uname -r)/build
+KERNELDIR_LKP ?= /home/christianwichmann/sciebo/02_Studium_ComputerEngineering/Master_1.Semester/LKP_Desktop/linux
+
 
 all:
-	make -C $(KERNELDIR) M=$(PWD) modules
+	make -C $(KERNELDIR_LKP) M=$(PWD) modules
 
 debug:
-	make -C $(KERNELDIR) M=$(PWD) ccflags-y+="-DDEBUG -g" modules
+	make -C $(KERNELDIR_LKP) M=$(PWD) ccflags-y+="-DDEBUG -g" modules
 
 clean:
-	make -C $(KERNELDIR) M=$(PWD) clean
+	make -C $(KERNELDIR_LKP) M=$(PWD) clean
 	rm -rf *~
 
 .PHONY: all clean

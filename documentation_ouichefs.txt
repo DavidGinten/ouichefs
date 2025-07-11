@@ -1,0 +1,14 @@
+Projekt ouichefs
+Task 1.1
+Navigate to the mkfs directory to build the formatting tool:
+-cd mkfs
+-make
+This creates the mkfs.ouichefs executable, which is used to format a partition with the OuicheFS file system.
+
+Task 1.2 
+Goal: Reimplementing read and write functions without page cache
+Approach: Replace read_iter and write_iter with custom read and write implementations.
+- add ouichefs_read() and ouichefs_write() functions.
+- change ouichefs_file_ops to use them.
+
+How to test: 
