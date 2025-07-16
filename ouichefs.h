@@ -11,8 +11,8 @@
 
 #define OUICHEFS_MAGIC 0x48434957
 
-// The superblock is the first block of the partition (block 0). 
-// It contains the partition's metadata, such as the number of blocks, 
+// The superblock is the first block of the partition (block 0).
+// It contains the partition's metadata, such as the number of blocks,
 // number of inodes, number of free inodes/blocks, ...
 #define OUICHEFS_SB_BLOCK_NR 0
 
@@ -83,7 +83,7 @@ struct ouichefs_sb_info {
 	unsigned long *bfree_bitmap; /* In-memory free blocks bitmap */
 };
 
-// The list of blocks containing the actual data of this file. 
+// The list of blocks containing the actual data of this file.
 // Since block IDs are stored as 32-bit values, at most 1024 links fit
 // in a single block, limiting the size of a file to 4 MiB.
 // index_block in  struct ouichefs_inode is an int. This int represents
@@ -93,8 +93,8 @@ struct ouichefs_file_index_block {
 	__le32 blocks[OUICHEFS_BLOCK_SIZE >> 2];
 };
 
-// The list of files in this directory. 
-// A directory can contain at most 128 files, and filenames are limited 
+// The list of files in this directory.
+// A directory can contain at most 128 files, and filenames are limited
 // to 28 characters to fit in a single block.
 struct ouichefs_dir_block {
 	struct ouichefs_file {

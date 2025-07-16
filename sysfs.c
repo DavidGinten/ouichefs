@@ -215,7 +215,7 @@ static struct attribute_group ouichefs_attr_group = {
 };
 
 /* Global superblock pointer for sysfs access */
-static struct super_block *g_sb = NULL;
+static struct super_block *g_sb;
 
 static struct super_block *ouichefs_get_sb(void)
 {
@@ -249,7 +249,7 @@ static int ouichefs_count_sliced_stats(struct super_block *sb, uint32_t *sliced_
 
 	/* Walk through the list of partially filled sliced blocks */
 	current_block = sbi->s_free_sliced_blocks;
-	
+
 	while (current_block != 0) {
 		bh = sb_bread(sb, current_block);
 		if (!bh) {
@@ -258,7 +258,7 @@ static int ouichefs_count_sliced_stats(struct super_block *sb, uint32_t *sliced_
 		}
 
 		meta = (struct ouichefs_sliced_block_meta *)bh->b_data;
-		
+
 		/* Verify this is a sliced block */
 		if (le32_to_cpu(meta->magic) == OUICHEFS_SLICED_MAGIC) {
 			uint32_t bitmap = le32_to_cpu(meta->slice_bitmap);
@@ -266,13 +266,13 @@ static int ouichefs_count_sliced_stats(struct super_block *sb, uint32_t *sliced_
 			int i;
 
 			total_sliced++;
-			
+
 			/* Count free slices in this block (bits set to 1) */
 			for (i = 1; i < OUICHEFS_SLICES_PER_BLOCK; i++) {
 				if (bitmap & (1U << i))
 					free_in_block++;
 			}
-			
+
 			total_free += free_in_block;
 		}
 
@@ -285,7 +285,7 @@ static int ouichefs_count_sliced_stats(struct super_block *sb, uint32_t *sliced_
 	/* For now, we'll scan the block bitmap to identify sliced blocks */
 	uint32_t data_start = 1 + sbi->nr_istore_blocks + sbi->nr_ifree_blocks + sbi->nr_bfree_blocks;
 	uint32_t block_num;
-	
+
 	for (block_num = data_start; block_num < sbi->nr_blocks; block_num++) {
 		/* Check if block is allocated */
 		if (!test_bit(block_num, sbi->bfree_bitmap)) {
@@ -295,7 +295,7 @@ static int ouichefs_count_sliced_stats(struct super_block *sb, uint32_t *sliced_
 				meta = (struct ouichefs_sliced_block_meta *)bh->b_data;
 				if (le32_to_cpu(meta->magic) == OUICHEFS_SLICED_MAGIC) {
 					uint32_t bitmap = le32_to_cpu(meta->slice_bitmap);
-					
+
 					/* If this block is not in the free list (bitmap == 0), count it */
 					if (bitmap == 0) {
 						total_sliced++;
@@ -314,7 +314,7 @@ static int ouichefs_count_sliced_stats(struct super_block *sb, uint32_t *sliced_
 /**
  * Count files and collect size statistics by scanning all inodes
  */
-static int ouichefs_count_file_stats(struct super_block *sb, uint32_t *files, uint32_t *small_files, 
+static int ouichefs_count_file_stats(struct super_block *sb, uint32_t *files, uint32_t *small_files,
 				     uint64_t *total_data_size)
 {
 	struct ouichefs_sb_info *sbi = OUICHEFS_SB(sb);
@@ -330,20 +330,20 @@ static int ouichefs_count_file_stats(struct super_block *sb, uint32_t *files, ui
 	for (i = 1; i < sbi->nr_inodes; i++) {  /* Start from 1, skip root */
 		inode_block = (i / OUICHEFS_INODES_PER_BLOCK) + 1;
 		inode_shift = i % OUICHEFS_INODES_PER_BLOCK;
-		
+
 		bh = sb_bread(sb, inode_block);
 		if (!bh)
 			continue;
 
 		inode = (struct ouichefs_inode *)bh->b_data + inode_shift;
-		
+
 		/* Check if inode is in use (has a mode set) */
 		if (le32_to_cpu(inode->i_mode) != 0 && S_ISREG(le32_to_cpu(inode->i_mode))) {
 			uint32_t size = le32_to_cpu(inode->i_size);
-			
+
 			total_files++;
 			total_size += size;
-			
+
 			if (ouichefs_is_small_file(size)) {
 				total_small++;
 			}
@@ -373,7 +373,7 @@ static int ouichefs_collect_stats(struct super_block *sb, struct ouichefs_stats 
 
 	/* Basic block statistics */
 	stats->free_blocks = sbi->nr_free_blocks;
-	stats->used_blocks = sbi->nr_blocks - 1 - sbi->nr_istore_blocks - 
+	stats->used_blocks = sbi->nr_blocks - 1 - sbi->nr_istore_blocks -
 			     sbi->nr_ifree_blocks - sbi->nr_bfree_blocks - sbi->nr_free_blocks;
 
 	/* Sliced block statistics */
@@ -460,7 +460,7 @@ void ouichefs_sysfs_remove_partition(void)
 		kobject_put(partition_kobj);
 		partition_kobj = NULL;
 	}
-	
+
 	ouichefs_sysfs_clear_sb();
 }
 
@@ -470,7 +470,7 @@ void ouichefs_sysfs_remove_partition(void)
 void ouichefs_sysfs_exit(void)
 {
 	ouichefs_sysfs_remove_partition();
-	
+
 	if (ouichefs_kobj) {
 		kobject_put(ouichefs_kobj);
 		ouichefs_kobj = NULL;

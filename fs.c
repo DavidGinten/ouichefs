@@ -20,10 +20,10 @@ struct dentry *ouichefs_mount(struct file_system_type *fs_type, int flags,
 			      const char *dev_name, void *data)
 {
 	// This is the struct dentry * for the root of the mounted filesystem
-	// and returns a struct block_device *bdev. It checks whether 
-	// a superblock for this device already exists and either reuses 
-	// or creates a new one. Then ouichefs_fill_super is called 
-	// with the superblock to finish setup. (e.g. Allocates and 
+	// and returns a struct block_device *bdev. It checks whether
+	// a superblock for this device already exists and either reuses
+	// or creates a new one. Then ouichefs_fill_super is called
+	// with the superblock to finish setup. (e.g. Allocates and
 	// initializes the root inode)
 	struct dentry *dentry = NULL;
 	struct super_block *sb;
@@ -42,18 +42,18 @@ struct dentry *ouichefs_mount(struct file_system_type *fs_type, int flags,
 
 	/* Create sysfs entries for this partition */
 	sb = dentry->d_sb;
-	
+
 	/* Extract partition name from device name */
 	dev_basename = strrchr(dev_name, '/');
 	if (dev_basename)
 		dev_basename++; /* Skip the '/' */
 	else
 		dev_basename = dev_name;
-	
+
 	/* Create safe partition name for sysfs */
 	snprintf(partition_name, sizeof(partition_name), "%.20s", dev_basename);
-	
-	/* Replace any invalid characters with underscores 
+
+	/* Replace any invalid characters with underscores
 	char *p = partition_name;
 	while (*p) {
 		if (!isalnum(*p) && *p != '_' && *p != '-')

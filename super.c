@@ -343,7 +343,7 @@ int ouichefs_fill_super(struct super_block *sb, void *data, int silent)
 	}
 	inode_init_owner(&nop_mnt_idmap, root_inode, NULL, root_inode->i_mode);
 	/* d_make_root should only be run once */
-	// Returns a dentry (the root of the FS) to mount_bdev(), 
+	// Returns a dentry (the root of the FS) to mount_bdev(),
 	// which returns it to ouichefs_mount(), and finally to VFS
 	sb->s_root = d_make_root(root_inode);
 	if (!sb->s_root) {
@@ -352,7 +352,7 @@ int ouichefs_fill_super(struct super_block *sb, void *data, int silent)
 	}
 
 	//pr_info("OuiChefs filesystem mounted successfully\n");
-	//pr_info("Blocks: total=%u, free=%u, sliced_list_head=%u\n", 
+	//pr_info("Blocks: total=%u, free=%u, sliced_list_head=%u\n",
 	//	sbi->nr_blocks, sbi->nr_free_blocks, sbi->s_free_sliced_blocks);
 	return 0;
 

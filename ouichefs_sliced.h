@@ -60,7 +60,7 @@ static inline uint32_t ouichefs_get_slice_number(uint32_t index_block)
  */
 static inline uint32_t ouichefs_make_slice_index(uint32_t block_num, uint32_t slice_num)
 {
-	return (block_num & OUICHEFS_SLICE_BLOCK_MASK) | 
+	return (block_num & OUICHEFS_SLICE_BLOCK_MASK) |
 	       ((slice_num & OUICHEFS_SLICE_NUMBER_MASK) << OUICHEFS_SLICE_NUMBER_SHIFT);
 }
 
@@ -83,10 +83,10 @@ static inline uint32_t ouichefs_get_slice_offset(loff_t pos, uint32_t slice_size
 /* Function declarations */
 uint32_t ouichefs_alloc_slice(struct super_block *sbi, uint32_t *slice_num);
 void ouichefs_free_slice(struct super_block *sbi, uint32_t block_num, uint32_t slice_num);
-int ouichefs_read_slice(struct super_block *sb, uint32_t block_num, uint32_t slice_num, 
-                       char *buffer, size_t size);
+int ouichefs_read_slice(struct super_block *sb, uint32_t block_num, uint32_t slice_num,
+						char *buffer, size_t size);
 int ouichefs_write_slice(struct super_block *sb, uint32_t block_num, uint32_t slice_num,
-                        const char *buffer, size_t size);
+						const char *buffer, size_t size);
 int ouichefs_init_sliced_block(struct super_block *sb, uint32_t block_num);
 
 #endif /* _OUICHEFS_SLICED_H */
