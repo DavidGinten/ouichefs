@@ -52,7 +52,7 @@ struct ouichefs_inode {
 	__le64 i_nmtime; /* Modification time (nsec) */
 	__le32 i_blocks; /* Block count */
 	__le32 i_nlink; /* Hard links count */
-	__le32 index_block; /* Block with list of blocks for this file */
+	__le32 index_block; /* Block with list of blocks for this file OR slice location for small files */
 };
 
 struct ouichefs_inode_info {
@@ -75,6 +75,9 @@ struct ouichefs_sb_info {
 
 	uint32_t nr_free_inodes; /* Number of free inodes */
 	uint32_t nr_free_blocks; /* Number of free blocks */
+
+	/* Block sharing support for small files */
+	uint32_t s_free_sliced_blocks; /* First block in partially filled sliced blocks list */
 
 	unsigned long *ifree_bitmap; /* In-memory free inodes bitmap */
 	unsigned long *bfree_bitmap; /* In-memory free blocks bitmap */
@@ -112,6 +115,14 @@ struct inode *ouichefs_iget(struct super_block *sb, unsigned long ino);
 extern const struct file_operations ouichefs_file_ops;
 extern const struct file_operations ouichefs_dir_ops;
 extern const struct address_space_operations ouichefs_aops;
+
+/* sysfs functions */
+int ouichefs_sysfs_init(void);
+void ouichefs_sysfs_exit(void);
+int ouichefs_sysfs_create_partition(struct super_block *sb, const char *partition_name);
+void ouichefs_sysfs_remove_partition(void);
+void ouichefs_sysfs_set_sb(struct super_block *sb);
+void ouichefs_sysfs_clear_sb(void);
 
 /* Getters for superbock and inode */
 #define OUICHEFS_SB(sb) (sb->s_fs_info)

@@ -115,6 +115,7 @@ static int sync_sb_info(struct super_block *sb, int wait)
 	disk_sb->nr_bfree_blocks = cpu_to_le32(sbi->nr_bfree_blocks);
 	disk_sb->nr_free_inodes = cpu_to_le32(sbi->nr_free_inodes);
 	disk_sb->nr_free_blocks = cpu_to_le32(sbi->nr_free_blocks);
+	disk_sb->s_free_sliced_blocks = cpu_to_le32(sbi->s_free_sliced_blocks);
 
 	mark_buffer_dirty(bh);
 	if (wait)
@@ -240,6 +241,8 @@ int ouichefs_fill_super(struct super_block *sb, void *data, int silent)
 	int ret = 0, i;
 
 	/* Init sb */
+	// Register my FS's rules with the VFS
+	// Tell the VFS how my filesystem works
 	sb->s_magic = OUICHEFS_MAGIC;
 	sb_set_blocksize(sb, OUICHEFS_BLOCK_SIZE);
 	sb->s_maxbytes = OUICHEFS_MAX_FILESIZE;
@@ -247,9 +250,11 @@ int ouichefs_fill_super(struct super_block *sb, void *data, int silent)
 	sb->s_time_gran = 1;
 
 	/* Read sb from disk */
+	// Read the actual on-disk metadata
 	bh = sb_bread(sb, OUICHEFS_SB_BLOCK_NR);
 	if (!bh)
 		return -EIO;
+	// Store FS-wide info in my own struct
 	csb = (struct ouichefs_sb_info *)bh->b_data;
 
 	/* Check magic number */
@@ -272,6 +277,7 @@ int ouichefs_fill_super(struct super_block *sb, void *data, int silent)
 	sbi->nr_bfree_blocks = le32_to_cpu(csb->nr_bfree_blocks);
 	sbi->nr_free_inodes = le32_to_cpu(csb->nr_free_inodes);
 	sbi->nr_free_blocks = le32_to_cpu(csb->nr_free_blocks);
+	sbi->s_free_sliced_blocks = le32_to_cpu(csb->s_free_sliced_blocks);
 	sb->s_fs_info = sbi;
 
 	brelse(bh);
@@ -337,12 +343,17 @@ int ouichefs_fill_super(struct super_block *sb, void *data, int silent)
 	}
 	inode_init_owner(&nop_mnt_idmap, root_inode, NULL, root_inode->i_mode);
 	/* d_make_root should only be run once */
+	// Returns a dentry (the root of the FS) to mount_bdev(), 
+	// which returns it to ouichefs_mount(), and finally to VFS
 	sb->s_root = d_make_root(root_inode);
 	if (!sb->s_root) {
 		ret = -ENOMEM;
 		goto free_bfree;
 	}
 
+	//pr_info("OuiChefs filesystem mounted successfully\n");
+	//pr_info("Blocks: total=%u, free=%u, sliced_list_head=%u\n", 
+	//	sbi->nr_blocks, sbi->nr_free_blocks, sbi->s_free_sliced_blocks);
 	return 0;
 
 free_bfree:
