@@ -24,6 +24,12 @@ static struct kobject *partition_kobj;
 
 /* Statistics structure */
 struct ouichefs_stats {
+	uint32_t total_blocks;
+	uint32_t total_inodes;
+ 	uint32_t inode_store_blocks;
+	uint32_t inode_free_bitmap_blocks;
+	uint32_t block_free_bitmap_blocks;
+	uint32_t free_inodes;
 	uint32_t free_blocks;
 	uint32_t used_blocks;
 	uint32_t sliced_blocks;
@@ -38,6 +44,31 @@ struct ouichefs_stats {
 /* Forward declarations */
 static int ouichefs_collect_stats(struct super_block *sb, struct ouichefs_stats *stats);
 static struct super_block *ouichefs_get_sb(void);
+
+/* SysFS show functions */
+static ssize_t other_stats_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
+{
+	struct super_block *sb = ouichefs_get_sb();
+	struct ouichefs_stats stats;
+	int ret;
+
+	if (!sb)
+		return -ENODEV;
+
+	ret = ouichefs_collect_stats(sb, &stats);
+	if (ret)
+		return ret;
+
+	return sprintf(buf, "Total Blocks: %u\n"
+						"Total Inodes: %u\n"
+						"Nr_istore_blocks: %u\n"
+						"Nr_ifree_blocks: %u\n"
+						"Nr_bfree_blocks: %u\n" 
+						"Nr_free_inodes: %u\n",
+						stats.total_blocks, stats.total_inodes,
+						stats.inode_store_blocks, stats.inode_free_bitmap_blocks,
+						stats.block_free_bitmap_blocks, stats.free_inodes);
+}
 
 /* SysFS show functions */
 static ssize_t free_blocks_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
@@ -185,6 +216,7 @@ static ssize_t efficiency_show(struct kobject *kobj, struct kobj_attribute *attr
 }
 
 /* Define sysfs attributes */
+static struct kobj_attribute other_stats_attr = __ATTR_RO(other_stats);
 static struct kobj_attribute free_blocks_attr = __ATTR_RO(free_blocks);
 static struct kobj_attribute used_blocks_attr = __ATTR_RO(used_blocks);
 static struct kobj_attribute sliced_blocks_attr = __ATTR_RO(sliced_blocks);
@@ -197,6 +229,7 @@ static struct kobj_attribute efficiency_attr = __ATTR_RO(efficiency);
 
 /* Attribute array */
 static struct attribute *ouichefs_attrs[] = {
+	&other_stats_attr.attr,
 	&free_blocks_attr.attr,
 	&used_blocks_attr.attr,
 	&sliced_blocks_attr.attr,
@@ -337,15 +370,19 @@ static int ouichefs_count_file_stats(struct super_block *sb, uint32_t *files, ui
 
 		inode = (struct ouichefs_inode *)bh->b_data + inode_shift;
 
-		/* Check if inode is in use (has a mode set) */
+		/* Check if inode is in use and is a regular file */
 		if (le32_to_cpu(inode->i_mode) != 0 && S_ISREG(le32_to_cpu(inode->i_mode))) {
 			uint32_t size = le32_to_cpu(inode->i_size);
 
 			total_files++;
 			total_size += size;
 
-			if (ouichefs_is_small_file(size)) {
+			/* Check if it's a small file (using sliced blocks) */
+			if (size <= 128 && size > 0) {
 				total_small++;
+				pr_debug("Found small file: inode %u, size %u bytes\n", i, size);
+			} else if (size > 128) {
+				pr_debug("Found large file: inode %u, size %u bytes\n", i, size);
 			}
 		}
 
@@ -355,6 +392,10 @@ static int ouichefs_count_file_stats(struct super_block *sb, uint32_t *files, ui
 	*files = total_files;
 	*small_files = total_small;
 	*total_data_size = total_size;
+		
+	pr_debug("File stats: total=%u, small=%u, total_size=%llu\n", 
+		 total_files, total_small, total_size);
+	
 	return 0;
 }
 
@@ -372,9 +413,19 @@ static int ouichefs_collect_stats(struct super_block *sb, struct ouichefs_stats 
 	memset(stats, 0, sizeof(*stats));
 
 	/* Basic block statistics */
+	stats->total_blocks = sbi->nr_blocks;
+	stats->total_inodes = sbi->nr_inodes;
+	stats->inode_store_blocks = sbi->nr_istore_blocks;
+	stats->inode_free_bitmap_blocks = sbi->nr_ifree_blocks;
+	stats->block_free_bitmap_blocks = sbi->nr_bfree_blocks;
+	stats->free_inodes = sbi->nr_free_inodes;
 	stats->free_blocks = sbi->nr_free_blocks;
-	stats->used_blocks = sbi->nr_blocks - 1 - sbi->nr_istore_blocks -
-			     sbi->nr_ifree_blocks - sbi->nr_bfree_blocks - sbi->nr_free_blocks;
+
+	/* Calculate actual used blocks correctly */
+	/* Used blocks = Total data blocks - Free blocks */
+	uint32_t total_data_blocks = sbi->nr_blocks - 1 - sbi->nr_istore_blocks -
+	                            sbi->nr_ifree_blocks - sbi->nr_bfree_blocks;
+	stats->used_blocks = total_data_blocks - sbi->nr_free_blocks;
 
 	/* Sliced block statistics */
 	ret = ouichefs_count_sliced_stats(sb, &stats->sliced_blocks, &stats->total_free_slices);
@@ -395,6 +446,9 @@ static int ouichefs_collect_stats(struct super_block *sb, struct ouichefs_stats 
 	} else {
 		stats->efficiency = 0;
 	}
+
+	pr_debug("Stats: used_blocks=%u, sliced_blocks=%u, files=%u, small_files=%u\n",
+		 stats->used_blocks, stats->sliced_blocks, stats->files, stats->small_files);
 
 	return 0;
 }

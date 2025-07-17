@@ -139,6 +139,7 @@ static struct dentry *ouichefs_lookup(struct inode *dir, struct dentry *dentry,
 
 /*
  * Create a new inode in dir.
+ * FIXED: Don't allocate index blocks for small files initially (Task 1.4)
  */
 static struct inode *ouichefs_new_inode(struct inode *dir, mode_t mode)
 {
@@ -158,7 +159,12 @@ static struct inode *ouichefs_new_inode(struct inode *dir, mode_t mode)
 	/* Check if inodes are available */
 	sb = dir->i_sb;
 	sbi = OUICHEFS_SB(sb);
-	if (sbi->nr_free_inodes == 0 || sbi->nr_free_blocks == 0)
+	if (sbi->nr_free_inodes == 0)
+		return ERR_PTR(-ENOSPC);
+
+	/* For directories, we always need an index block */
+	/* For regular files, we'll allocate blocks later when we know the file size */
+	if (S_ISDIR(mode) && sbi->nr_free_blocks == 0)
 		return ERR_PTR(-ENOSPC);
 
 	/* Get a new free inode */
@@ -172,28 +178,40 @@ static struct inode *ouichefs_new_inode(struct inode *dir, mode_t mode)
 	}
 	ci = OUICHEFS_INODE(inode);
 
-	/* Get a free block for this new inode's index */
-	bno = get_free_block(sbi);
-	if (!bno) {
-		ret = -ENOSPC;
-		goto put_inode;
+	/* Only allocate index block for directories */
+	if (S_ISDIR(mode)) {
+		/* Get a free block for this new directory's index */
+		bno = get_free_block(sbi);
+		if (!bno) {
+			ret = -ENOSPC;
+			goto put_inode;
+		}
+		ci->index_block = bno;
+		inode->i_blocks = 1;
+	} else {
+		/* Regular files start with no blocks allocated */
+		/* Blocks will be allocated when data is written */
+		ci->index_block = 0;
+		inode->i_blocks = 0;
 	}
-	ci->index_block = bno;
 
 	/* Initialize inode */
 	inode_init_owner(&nop_mnt_idmap, inode, dir, mode);
-	inode->i_blocks = 1;
+	
 	if (S_ISDIR(mode)) {
 		inode->i_size = OUICHEFS_BLOCK_SIZE;
 		inode->i_fop = &ouichefs_dir_ops;
 	} else if (S_ISREG(mode)) {
-		inode->i_size = 0;
+		inode->i_size = 0;  /* Empty file initially */
 		inode->i_fop = &ouichefs_file_ops;
 		inode->i_mapping->a_ops = &ouichefs_aops;
 	}
 	set_nlink(inode, 1);
 
 	inode->i_ctime = inode->i_atime = inode->i_mtime = current_time(inode);
+
+	/*pr_debug("Created new inode %u, mode=%o, blocks=%u, index_block=%u\n", 
+		 ino, mode, inode->i_blocks, ci->index_block);*/
 
 	return inode;
 
@@ -208,9 +226,10 @@ put_ino:
 /*
  * Create a file or directory in this way:
  *   - check filename length and if the parent directory is not full
- *   - create the new inode (allocate inode and blocks)
- *   - cleanup index block of the new inode
+ *   - create the new inode (allocate inode and blocks only for directories)
+ *   - cleanup index block of the new inode (only for directories)
  *   - add new file/directory in parent index
+ * FIXED: Only initialize index blocks for directories (task 1.4)
  */
 static int ouichefs_create(struct mnt_idmap *idmap, struct inode *dir,
 			   struct dentry *dentry, umode_t mode, bool excl)
@@ -249,18 +268,20 @@ static int ouichefs_create(struct mnt_idmap *idmap, struct inode *dir,
 	}
 
 	/*
-	 * Scrub index_block for new file/directory to avoid previous data
-	 * messing with new file/directory.
+	 * Only scrub index_block for directories
+	 * Regular files will allocate blocks when data is written
 	 */
-	bh2 = sb_bread(sb, OUICHEFS_INODE(inode)->index_block);
-	if (!bh2) {
-		ret = -EIO;
-		goto iput;
+	if (S_ISDIR(mode)) {
+		bh2 = sb_bread(sb, OUICHEFS_INODE(inode)->index_block);
+		if (!bh2) {
+			ret = -EIO;
+			goto iput;
+		}
+		fblock = (char *)bh2->b_data;
+		memset(fblock, 0, OUICHEFS_BLOCK_SIZE);
+		mark_buffer_dirty(bh2);
+		brelse(bh2);
 	}
-	fblock = (char *)bh2->b_data;
-	memset(fblock, 0, OUICHEFS_BLOCK_SIZE);
-	mark_buffer_dirty(bh2);
-	brelse(bh2);
 
 	/* Find first free slot in parent index and register new inode */
 	for (i = 0; i < OUICHEFS_MAX_SUBFILES; i++)
@@ -282,10 +303,16 @@ static int ouichefs_create(struct mnt_idmap *idmap, struct inode *dir,
 	/* setup dentry */
 	d_instantiate(dentry, inode);
 
+	/*pr_debug("Created %s: inode %lu, blocks=%u\n", 
+		 S_ISDIR(mode) ? "directory" : "file", 
+		 inode->i_ino, inode->i_blocks);*/
+
 	return 0;
 
 iput:
-	put_block(OUICHEFS_SB(sb), OUICHEFS_INODE(inode)->index_block);
+	/* Only put block if it was allocated (directories only) */
+	if (S_ISDIR(mode) && OUICHEFS_INODE(inode)->index_block != 0)
+		put_block(OUICHEFS_SB(sb), OUICHEFS_INODE(inode)->index_block);
 	put_inode(OUICHEFS_SB(sb), inode->i_ino);
 	iput(inode);
 end:
