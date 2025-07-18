@@ -226,7 +226,7 @@ int main(int argc, char *argv[])
 		perror("IOCTL failed");
 		switch (errno) {
 		case EINVAL:
-			fprintf(stderr, "Error: File is not a regular file or exceeds 128 bytes\n");
+			fprintf(stderr, "Error: File is not a regular file or exceeds 128 bytes or doesn't use slices\n");
 			break;
 		case ENODATA:
 			fprintf(stderr, "Error: File has no slice allocated\n");

@@ -69,7 +69,7 @@ static inline uint32_t ouichefs_make_slice_index(uint32_t block_num, uint32_t sl
  */
 static inline bool ouichefs_is_small_file(size_t size)
 {
-	return size <= OUICHEFS_SMALL_FILE_THRESHOLD;
+	return size <= 128;//OUICHEFS_SMALL_FILE_THRESHOLD;
 }
 
 /**

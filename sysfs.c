@@ -346,8 +346,9 @@ static int ouichefs_count_sliced_stats(struct super_block *sb, uint32_t *sliced_
 
 /**
  * Count files and collect size statistics by scanning all inodes
+ * FIXED: Use nlink as the primary indicator of file deletion
  */
-static int ouichefs_count_file_stats(struct super_block *sb, uint32_t *files, uint32_t *small_files,
+static int ouichefs_count_file_stats(struct super_block *sb, uint32_t *files, uint32_t *small_files, 
 				     uint64_t *total_data_size)
 {
 	struct ouichefs_sb_info *sbi = OUICHEFS_SB(sb);
@@ -363,27 +364,55 @@ static int ouichefs_count_file_stats(struct super_block *sb, uint32_t *files, ui
 	for (i = 1; i < sbi->nr_inodes; i++) {  /* Start from 1, skip root */
 		inode_block = (i / OUICHEFS_INODES_PER_BLOCK) + 1;
 		inode_shift = i % OUICHEFS_INODES_PER_BLOCK;
-
+		
 		bh = sb_bread(sb, inode_block);
 		if (!bh)
 			continue;
 
 		inode = (struct ouichefs_inode *)bh->b_data + inode_shift;
-
-		/* Check if inode is in use and is a regular file */
-		if (le32_to_cpu(inode->i_mode) != 0 && S_ISREG(le32_to_cpu(inode->i_mode))) {
-			uint32_t size = le32_to_cpu(inode->i_size);
-
+		
+		/* 
+		 * Check if inode is in use and is a regular file
+		 * In Linux filesystems, nlink == 0 means the file is deleted
+		 * We use nlink as the primary deletion indicator
+		 */
+		uint32_t mode = le32_to_cpu(inode->i_mode);
+		uint32_t nlink = le32_to_cpu(inode->i_nlink);
+		uint32_t size = le32_to_cpu(inode->i_size);
+		
+		/* Skip deleted/free inodes - nlink == 0 means deleted */
+		if (nlink == 0) {
+			pr_debug("Skipping deleted inode %u (nlink=0, mode=%u, size=%u)\n", 
+				 i, mode, size);
+			brelse(bh);
+			continue;
+		}
+		
+		/* Also skip if mode is 0 (completely uninitialized) */
+		if (mode == 0) {
+			pr_debug("Skipping uninitialized inode %u (mode=0, nlink=%u, size=%u)\n", 
+				 i, nlink, size);
+			brelse(bh);
+			continue;
+		}
+		
+		/* Only count regular files */
+		if (S_ISREG(mode)) {
 			total_files++;
 			total_size += size;
-
+			
 			/* Check if it's a small file (using sliced blocks) */
-			if (size <= 128 && size > 0) {
+			if (size > 0 && size <= 128) {
 				total_small++;
-				pr_debug("Found small file: inode %u, size %u bytes\n", i, size);
+				pr_debug("Found small file: inode %u, size %u bytes, nlink=%u\n", i, size, nlink);
 			} else if (size > 128) {
-				pr_debug("Found large file: inode %u, size %u bytes\n", i, size);
+				pr_debug("Found large file: inode %u, size %u bytes, nlink=%u\n", i, size, nlink);
+			} else if (size == 0) {
+				pr_debug("Found empty file: inode %u, nlink=%u\n", i, nlink);
+				/* Empty files are counted as regular files but not as small files */
 			}
+		} else {
+			pr_debug("Skipping non-regular file: inode %u, mode=0%o, nlink=%u\n", i, mode, nlink);
 		}
 
 		brelse(bh);
@@ -392,8 +421,8 @@ static int ouichefs_count_file_stats(struct super_block *sb, uint32_t *files, ui
 	*files = total_files;
 	*small_files = total_small;
 	*total_data_size = total_size;
-		
-	pr_debug("File stats: total=%u, small=%u, total_size=%llu\n", 
+	
+	pr_debug("File stats scan result: total=%u, small=%u, total_size=%llu\n", 
 		 total_files, total_small, total_size);
 	
 	return 0;

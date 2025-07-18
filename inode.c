@@ -14,6 +14,7 @@
 
 #include "ouichefs.h"
 #include "bitmap.h"
+#include "ouichefs_sliced.h"
 
 static const struct inode_operations ouichefs_inode_ops;
 
@@ -323,23 +324,29 @@ end:
 /*
  * Remove a link for a file. If link count is 0, destroy file in this way:
  *   - remove the file from its parent directory.
- *   - cleanup blocks containing data
- *   - cleanup file index block
+ *   - cleanup blocks containing data (different for small vs large files)
+ *   - cleanup file index block (only for large files)
  *   - cleanup inode
+ * UPDATED: Handle small files using slices and large files using index blocks
  */
 static int ouichefs_unlink(struct inode *dir, struct dentry *dentry)
 {
 	struct super_block *sb = dir->i_sb;
 	struct ouichefs_sb_info *sbi = OUICHEFS_SB(sb);
 	struct inode *inode = d_inode(dentry);
+	struct ouichefs_inode_info *ci = OUICHEFS_INODE(inode);
 	struct buffer_head *bh = NULL, *bh2 = NULL;
 	struct ouichefs_dir_block *dir_block = NULL;
 	struct ouichefs_file_index_block *file_block = NULL;
 	uint32_t ino, bno;
 	int i, f_id = -1, nr_subs = 0;
+	bool is_small_file;
 
 	ino = inode->i_ino;
-	bno = OUICHEFS_INODE(inode)->index_block;
+	is_small_file = (inode->i_size <= 128 && inode->i_size > 0);
+
+	pr_debug("Unlinking %s file: inode %u, size %lld\n", 
+		 is_small_file ? "small" : "large", ino, inode->i_size);
 
 	/* Read parent directory index */
 	bh = sb_bread(sb, OUICHEFS_INODE(dir)->index_block);
@@ -364,67 +371,140 @@ static int ouichefs_unlink(struct inode *dir, struct dentry *dentry)
 	mark_buffer_dirty(bh);
 	brelse(bh);
 
-	/* Update inode stats */
+	/* Update parent directory stats */
 	dir->i_mtime = dir->i_ctime = current_time(dir);
 	if (S_ISDIR(inode->i_mode))
 		inode_dec_link_count(dir);
 	mark_inode_dirty(dir);
 
 	/*
-	 * Cleanup pointed blocks if unlinking a file. If we fail to read the
-	 * index block, cleanup inode anyway and lose this file's blocks
-	 * forever. If we fail to scrub a data block, don't fail (too late
-	 * anyway), just put the block and continue.
+	 * Handle data cleanup based on file type
 	 */
-	bh = sb_bread(sb, bno);
-	if (!bh)
-		goto clean_inode;
-	file_block = (struct ouichefs_file_index_block *)bh->b_data;
-	if (S_ISDIR(inode->i_mode))
-		goto scrub;
-	for (i = 0; i < inode->i_blocks - 1; i++) {
-		char *block;
+	if (is_small_file) {
+		/* Small file - release slice */
+		if (ci->index_block != 0) {
+			uint32_t block_num = ouichefs_get_slice_block(ci->index_block);
+			uint32_t slice_num = ouichefs_get_slice_number(ci->index_block);
 
-		if (!file_block->blocks[i])
-			continue;
+			pr_debug("Releasing slice %u in block %u for small file\n", 
+				 slice_num, block_num);
 
-    bh2 = sb_bread(sb, le32_to_cpu(file_block->blocks[i]));
-		if (!bh2)
-			goto put_block;
-		block = (char *)bh2->b_data;
-		memset(block, 0, OUICHEFS_BLOCK_SIZE);
-		mark_buffer_dirty(bh2);
-		brelse(bh2);
-put_block:
-		put_block(sbi, le32_to_cpu(file_block->blocks[i]));
+			/* Validate slice information */
+			if (block_num != 0 && slice_num != 0 && slice_num < OUICHEFS_SLICES_PER_BLOCK) {
+				ouichefs_free_slice(sb, block_num, slice_num);
+			} else {
+				pr_warn("Invalid slice info during unlink: block=%u, slice=%u\n", 
+					block_num, slice_num);
+			}
+		}
+	} else if (inode->i_size > 128) {
+		/* Large file - cleanup pointed blocks */
+		bno = ci->index_block;
+		if (bno == 0) {
+			pr_warn("Large file has no index block\n");
+			goto clean_inode;
+		}
+
+		bh = sb_bread(sb, bno);
+		if (!bh) {
+			pr_err("Failed to read index block %u, losing file blocks\n", bno);
+			goto clean_inode;
+		}
+		
+		file_block = (struct ouichefs_file_index_block *)bh->b_data;
+
+		/* Free all data blocks */
+		for (i = 0; i < inode->i_blocks - 1; i++) {
+			if (!file_block->blocks[i])
+				continue;
+
+			uint32_t data_block = le32_to_cpu(file_block->blocks[i]);
+			
+			/* Scrub the data block */
+			bh2 = sb_bread(sb, data_block);
+			if (bh2) {
+				memset(bh2->b_data, 0, OUICHEFS_BLOCK_SIZE);
+				mark_buffer_dirty(bh2);
+				brelse(bh2);
+			}
+
+			/* Release the block */
+			put_block(sbi, data_block);
+			pr_debug("Released data block %u\n", data_block);
+		}
+
+		/* Scrub and release index block */
+		memset(file_block, 0, OUICHEFS_BLOCK_SIZE);
+		mark_buffer_dirty(bh);
+		sync_dirty_buffer(bh);
+		brelse(bh);
+		
+		put_block(sbi, bno);
+		pr_debug("Released index block %u\n", bno);
+	} else {
+		/* Empty file (size == 0) - no data blocks to clean */
+		pr_debug("Empty file, no blocks to release\n");
 	}
-
-scrub:
-	/* Scrub index block */
-	memset(file_block, 0, OUICHEFS_BLOCK_SIZE);
-	mark_buffer_dirty(bh);
-	sync_dirty_buffer(bh);
-	brelse(bh);
 
 clean_inode:
 	/* Cleanup inode and mark dirty */
 	inode->i_blocks = 0;
-	OUICHEFS_INODE(inode)->index_block = 0;
+	ci->index_block = 0;
 	inode->i_size = 0;
 	i_uid_write(inode, 0);
 	i_gid_write(inode, 0);
 	inode->i_mode = 0;
-	inode->i_ctime.tv_sec = inode->i_mtime.tv_sec = inode->i_atime.tv_sec =
-		0;
-	inode->i_ctime.tv_nsec = inode->i_mtime.tv_nsec =
-		inode->i_atime.tv_nsec = 0;
-	inode_dec_link_count(inode);
+	inode->i_ctime.tv_sec = inode->i_mtime.tv_sec = inode->i_atime.tv_sec = 0;
+	inode->i_ctime.tv_nsec = inode->i_mtime.tv_nsec = inode->i_atime.tv_nsec = 0;
+	inode_dec_link_count(inode);  /* This sets nlink to 0 */
+	
+	pr_debug("After cleanup: inode %u, mode=%u, nlink=%u, size=%lld\n", 
+		 ino, inode->i_mode, inode->i_nlink, inode->i_size);
+	
 	mark_inode_dirty(inode);
 
-	/* Free inode and index block from bitmap */
-	put_block(sbi, bno);
+	/* CRITICAL: Force immediate write to disk */
+	/* We need to manually write the inode to disk because mark_inode_dirty() 
+	   only schedules the write for later, but sysfs reads from disk immediately */
+	{
+		struct ouichefs_inode *disk_inode;
+		struct buffer_head *bh_inode;
+		uint32_t inode_block_num = (ino / OUICHEFS_INODES_PER_BLOCK) + 1;
+		uint32_t inode_offset = ino % OUICHEFS_INODES_PER_BLOCK;
+
+		bh_inode = sb_bread(sb, inode_block_num);
+		if (bh_inode) {
+			disk_inode = (struct ouichefs_inode *)bh_inode->b_data + inode_offset;
+			
+			/* Manually update the on-disk inode */
+			disk_inode->i_mode = cpu_to_le32(0);
+			disk_inode->i_nlink = cpu_to_le32(0);
+			disk_inode->i_size = cpu_to_le32(0);
+			disk_inode->i_blocks = cpu_to_le32(0);
+			disk_inode->index_block = cpu_to_le32(0);
+			disk_inode->i_uid = cpu_to_le32(0);
+			disk_inode->i_gid = cpu_to_le32(0);
+			disk_inode->i_ctime = cpu_to_le32(0);
+			disk_inode->i_atime = cpu_to_le32(0);
+			disk_inode->i_mtime = cpu_to_le32(0);
+			disk_inode->i_nctime = cpu_to_le64(0);
+			disk_inode->i_natime = cpu_to_le64(0);
+			disk_inode->i_nmtime = cpu_to_le64(0);
+			
+			mark_buffer_dirty(bh_inode);
+			sync_dirty_buffer(bh_inode);  /* Force immediate write */
+			brelse(bh_inode);
+			
+			pr_debug("Forced disk write for inode %u\n", ino);
+		} else {
+			pr_err("Failed to read inode block for manual cleanup\n");
+		}
+	}
+
+	/* Free inode from bitmap */
 	put_inode(sbi, ino);
 
+	pr_debug("Unlink completed for inode %u\n", ino);
 	return 0;
 }
 

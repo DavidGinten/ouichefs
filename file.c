@@ -20,6 +20,15 @@
 
 MODULE_LICENSE("GPL");
 
+/* Forward declarations */
+static ssize_t ouichefs_convert_to_traditional(struct inode *inode, const char *new_data, 
+							size_t new_data_len, loff_t *pos);
+static ssize_t ouichefs_write_small_file(struct inode *inode, const char *kbuf, 
+							size_t bytes_to_write, loff_t *pos);
+static ssize_t ouichefs_write_large_file(struct inode *inode, const char *kbuf,
+							size_t bytes_to_write, loff_t *pos);
+static ssize_t ouichefs_read_traditional_file(struct inode *inode, char *buffer, size_t size);
+static void ouichefs_free_traditional_blocks(struct inode *inode);
 /*
  * Map the buffer_head passed in argument with the iblock-th block of the file
  * represented by inode. If the requested block is not allocated and create is
@@ -216,84 +225,117 @@ const struct address_space_operations ouichefs_aops = {
 	.write_end = ouichefs_write_end
 };
 
+/*
+ * Helper function to determine if a file currently uses slice storage
+ */
+static bool ouichefs_uses_slice_storage(struct inode *inode)
+{
+	struct ouichefs_inode_info *ci = OUICHEFS_INODE(inode);
+	
+	/* Empty files or files without index_block don't use either storage */
+	if (inode->i_size == 0 || ci->index_block == 0) {
+		return false;
+	}
+	
+	/* If file size is > 128 bytes, it must use traditional storage */
+	if (inode->i_size > 128) {
+		return false;
+	}
+	
+	/* For files <= 128 bytes, check if index_block contains slice info */
+	uint32_t block_num = ouichefs_get_slice_block(ci->index_block);
+	uint32_t slice_num = ouichefs_get_slice_number(ci->index_block);
+	
+	/* Valid slice storage has non-zero block and slice numbers */
+	return (block_num != 0 && slice_num != 0 && slice_num < OUICHEFS_SLICES_PER_BLOCK);
+}
+
 static int ouichefs_open(struct inode *inode, struct file *file)
 {
 	bool wronly = (file->f_flags & O_WRONLY) != 0;
 	bool rdwr = (file->f_flags & O_RDWR) != 0;
 	bool trunc = (file->f_flags & O_TRUNC) != 0;
 	bool append = (file->f_flags & O_APPEND) != 0;
-	pr_info("trunc: %d", trunc);
-	pr_info("append: %d", append);
+	
+	pr_debug("File open: size=%lld, trunc=%d, append=%d\n", inode->i_size, trunc, append);
+	
+	/* Handle truncation */
 	if ((wronly || rdwr) && trunc && (inode->i_size != 0)) {
 		struct super_block *sb = inode->i_sb;
 		struct ouichefs_sb_info *sbi = OUICHEFS_SB(sb);
 		struct ouichefs_inode_info *ci = OUICHEFS_INODE(inode);
-
-		/* Handle truncation for small files differently */
-		if (ouichefs_is_small_file(inode->i_size)) {
+		
+		pr_debug("Truncating file: current_size=%lld, uses_slices=%d\n", 
+			 inode->i_size, ouichefs_uses_slice_storage(inode));
+		
+		if (ouichefs_uses_slice_storage(inode)) {
+			/* File uses slice storage - free the slice */
 			uint32_t block_num = ouichefs_get_slice_block(ci->index_block);
 			uint32_t slice_num = ouichefs_get_slice_number(ci->index_block);
 			
-			/* Free the slice */
+			pr_debug("Freeing slice: block=%u, slice=%u\n", block_num, slice_num);
 			ouichefs_free_slice(sb, block_num, slice_num);
 			
 			/* Reset inode */
 			inode->i_size = 0;
 			inode->i_blocks = 0;
 			ci->index_block = 0;
-		} else {
-			/* Handle truncation for regular files */
+		} else if (ci->index_block != 0) {
+			/* File uses traditional storage - free all blocks */
 			struct ouichefs_file_index_block *index;
 			struct buffer_head *bh_index;
-			sector_t iblock;
-
+			uint32_t blocks_to_free = inode->i_blocks - 1; /* Subtract index block */
+			
+			pr_debug("Freeing traditional storage: index_block=%u, data_blocks=%u\n", 
+				 ci->index_block, blocks_to_free);
+			
 			bh_index = sb_bread(sb, ci->index_block);
-			if (!bh_index)
+			if (!bh_index) {
+				pr_err("Failed to read index block %u for truncation\n", ci->index_block);
 				return -EIO;
-			index = (struct ouichefs_file_index_block *)bh_index->b_data;
-
-			for (iblock = 0; index->blocks[iblock] != 0; iblock++) {
-				put_block(sbi, le32_to_cpu(index->blocks[iblock]));
-				index->blocks[iblock] = 0;
 			}
-			inode->i_size = 0;
-			inode->i_blocks = 1;
-
+			
+			index = (struct ouichefs_file_index_block *)bh_index->b_data;
+			
+			/* Free all data blocks */
+			for (uint32_t i = 0; i < blocks_to_free; i++) {
+				uint32_t data_block = le32_to_cpu(index->blocks[i]);
+				if (data_block != 0) {
+					put_block(sbi, data_block);
+					index->blocks[i] = 0;
+					pr_debug("Freed data block %u\n", data_block);
+				}
+			}
+			
+			/* Clear the index block but keep it allocated for future writes */
+			memset(index, 0, OUICHEFS_BLOCK_SIZE);
 			mark_buffer_dirty(bh_index);
+			sync_dirty_buffer(bh_index);
 			brelse(bh_index);
+			
+			/* Reset inode but keep index block */
+			inode->i_size = 0;
+			inode->i_blocks = 1; /* Keep index block */
+			/* Don't reset ci->index_block - keep it for reuse */
+		} else {
+			/* Empty file or file without storage - just reset size */
+			inode->i_size = 0;
+			inode->i_blocks = 0;
+			ci->index_block = 0;
 		}
+		
+		/* Mark inode as dirty after truncation */
+		mark_inode_dirty(inode);
+		pr_debug("Truncation completed: new_size=%lld, blocks=%llu\n", 
+			 inode->i_size, inode->i_blocks);
 	}
-	/* For appending - We append the new content to the file */
+	
+	/* Handle append mode */
 	if ((wronly || rdwr) && append && (inode->i_size != 0)) {
-		struct super_block *sb = inode->i_sb;
-		struct ouichefs_sb_info *sbi = OUICHEFS_SB(sb);
-		struct ouichefs_inode_info *ci = OUICHEFS_INODE(inode);
-
-		/* Handle appending for small files differently */
-		if (ouichefs_is_small_file(inode->i_size)) {
-			file->f_pos = inode->i_size;
-		} else {
-			/* Handle appending for regular files */
-			struct ouichefs_file_index_block *index;
-			struct buffer_head *bh_index;
-			sector_t iblock;
-
-			bh_index = sb_bread(sb, ci->index_block);
-			if (!bh_index)
-				return -EIO;
-			index = (struct ouichefs_file_index_block *)bh_index->b_data;
-
-			for (iblock = 0; index->blocks[iblock] != 0; iblock++) {
-				put_block(sbi, le32_to_cpu(index->blocks[iblock]));
-				index->blocks[iblock] = 0;
-			}
-			inode->i_size = 0;
-			inode->i_blocks = 1;
-
-			mark_buffer_dirty(bh_index);
-			brelse(bh_index);
-		}
+		file->f_pos = inode->i_size;
+		pr_debug("Append mode: set position to %lld\n", file->f_pos);
 	}
+	
 	return 0;
 }
 
@@ -384,29 +426,30 @@ static ssize_t ouichefs_read(struct file *file, char __user *buf, size_t len, lo
 static ssize_t ouichefs_write(struct file *file, const char __user *buf, size_t len, loff_t *pos)
 {
 	struct inode *inode = file->f_inode;
-	struct super_block *sb = inode->i_sb;
 	struct ouichefs_inode_info *ci = OUICHEFS_INODE(inode);
 	char *kbuf = NULL;
-	uint32_t block_num, slice_num;
 	size_t bytes_to_write;
 	ssize_t ret;
-	bool need_new_slice = false;
+	bool will_exceed_128_bytes = (*pos + len > 128);
+	bool is_currently_small = (inode->i_size <= 128 && inode->i_size >= 0);
+	bool is_currently_large = (inode->i_size > 128);
+	bool uses_slices = false;
 
 	if (*pos >= OUICHEFS_MAX_FILESIZE)
 		return -ENOSPC;
 
-	/* Check if final file size will exceed 128 bytes - return error if so */
-	if (*pos + len > 128) {
-		pr_err("File size would exceed 128 bytes (%lld + %zu = %lld bytes)\n", 
-		       *pos, len, *pos + len);
-		return -EFBIG;
-	}
-
-	/* Calculate how many bytes we can actually write within 128 byte limit */
-	bytes_to_write = min(len, (size_t)(128 - *pos));
+	/* Calculate how many bytes we can actually write */
+	bytes_to_write = min(len, (size_t)(OUICHEFS_MAX_FILESIZE - *pos));
 	
 	if (bytes_to_write == 0)
 		return 0;
+
+	/* Determine if file currently uses slice storage */
+	if (is_currently_small && ci->index_block != 0) {
+		uint32_t block_num = ouichefs_get_slice_block(ci->index_block);
+		uint32_t slice_num = ouichefs_get_slice_number(ci->index_block);
+		uses_slices = (block_num != 0 && slice_num != 0 && slice_num < OUICHEFS_SLICES_PER_BLOCK);
+	}
 
 	/* Copy data from user space */
 	kbuf = kmalloc(bytes_to_write, GFP_KERNEL);
@@ -418,22 +461,63 @@ static ssize_t ouichefs_write(struct file *file, const char __user *buf, size_t 
 		goto cleanup;
 	}
 
-	pr_debug("WRITE: len=%zu, pos=%lld, data: %.10s\n", bytes_to_write, *pos, kbuf);
+	pr_debug("WRITE: len=%zu, pos=%lld, will_exceed_128=%d, current_size=%lld, uses_slices=%d\n", 
+		 bytes_to_write, *pos, will_exceed_128_bytes, inode->i_size, uses_slices);
+
+	/* Decision logic for write handling */
+	if (is_currently_large) {
+		/* File is already large - use traditional storage operations */
+		pr_debug("Writing to existing large file\n");
+		ret = ouichefs_write_large_file(inode, kbuf, bytes_to_write, pos);
+	} else if (will_exceed_128_bytes && uses_slices) {
+		/* Small file with slices needs conversion to traditional storage */
+		pr_info("Converting slice-based file to traditional storage\n");
+		ret = ouichefs_convert_to_traditional(inode, kbuf, bytes_to_write, pos);
+	} else if (will_exceed_128_bytes && !uses_slices && ci->index_block == 0) {
+		/* Empty file that will be large - allocate traditional storage directly */
+		pr_info("Creating new large file with traditional storage\n");
+		ret = ouichefs_convert_to_traditional(inode, kbuf, bytes_to_write, pos);
+	} else if (will_exceed_128_bytes && !uses_slices && ci->index_block != 0) {
+		/* File already uses traditional storage - just expand it */
+		pr_debug("Expanding existing traditional storage file\n");
+		ret = ouichefs_write_large_file(inode, kbuf, bytes_to_write, pos);
+	} else if (!uses_slices && ci->index_block != 0) {
+		/* File currently uses traditional storage - keep using it (small content) */
+		pr_debug("Writing small content to existing traditional storage file\n");
+		ret = ouichefs_write_large_file(inode, kbuf, bytes_to_write, pos);
+	} else {
+		/* File will use slice storage (new small file or existing slice file) */
+		pr_debug("Writing to small file using slice storage\n");
+		ret = ouichefs_write_small_file(inode, kbuf, bytes_to_write, pos);
+	}
+
+cleanup:
+	kfree(kbuf);
+	return ret;
+}
+
+/*
+ * Write to small files using slice storage
+ */
+static ssize_t ouichefs_write_small_file(struct inode *inode, const char *kbuf, 
+					 size_t bytes_to_write, loff_t *pos)
+{
+	struct super_block *sb = inode->i_sb;
+	struct ouichefs_inode_info *ci = OUICHEFS_INODE(inode);
+	uint32_t block_num, slice_num;
+	bool need_new_slice = false;
+	ssize_t ret;
 
 	/* Determine if we need a new slice or can use existing one */
 	if (inode->i_size == 0) {
-		/* Empty file - need to allocate new slice */
 		need_new_slice = true;
 	} else {
-		/* File already has data - check if it has a valid slice allocated */
 		if (ci->index_block == 0) {
 			need_new_slice = true;
 		} else {
-			/* Extract existing slice information */
 			block_num = ouichefs_get_slice_block(ci->index_block);
 			slice_num = ouichefs_get_slice_number(ci->index_block);
 			
-			/* Validate the slice information */
 			if (block_num == 0 || slice_num == 0 || slice_num >= OUICHEFS_SLICES_PER_BLOCK) {
 				pr_err("Invalid slice information: block=%u, slice=%u\n", 
 				       block_num, slice_num);
@@ -447,83 +531,59 @@ static ssize_t ouichefs_write(struct file *file, const char __user *buf, size_t 
 		block_num = ouichefs_alloc_slice(sb, &slice_num);
 		if (!block_num) {
 			pr_err("Failed to allocate slice for small file\n");
-			ret = -ENOSPC;
-			goto cleanup;
+			return -ENOSPC;
 		}
 		
-		/* Update inode with new slice location */
 		ci->index_block = ouichefs_make_slice_index(block_num, slice_num);
-		
-		pr_debug("Allocated new slice: block=%u, slice=%u, index=0x%x\n", 
-			 block_num, slice_num, ci->index_block);
+		pr_debug("Allocated new slice: block=%u, slice=%u\n", block_num, slice_num);
 	}
 
 	/* Handle the write operation */
 	if (*pos == 0 && bytes_to_write <= 128) {
-		/* Complete overwrite of file content - need to clear the slice first */
+		/* Complete overwrite - clear slice and write new content */
 		char *slice_buffer = kmalloc(OUICHEFS_SLICE_SIZE, GFP_KERNEL);
-		if (!slice_buffer) {
-			ret = -ENOMEM;
-			goto cleanup;
-		}
+		if (!slice_buffer)
+			return -ENOMEM;
 		
-		/* Clear the entire slice buffer */
 		memset(slice_buffer, 0, OUICHEFS_SLICE_SIZE);
-		
-		/* Copy new data into the cleared buffer */
 		memcpy(slice_buffer, kbuf, bytes_to_write);
 		
-		/* Write the cleared buffer with new content to the slice */
 		ret = ouichefs_write_slice(sb, block_num, slice_num, slice_buffer, OUICHEFS_SLICE_SIZE);
-		
 		kfree(slice_buffer);
 		
 		if (ret < 0) {
 			pr_err("Failed to write slice: %zd\n", ret);
-			goto cleanup;
+			return ret;
 		}
 		
-		/* Update file size to match written data */
 		inode->i_size = bytes_to_write;
-		
-		/* Return the number of bytes written */
 		ret = bytes_to_write;
-		
 	} else {
-		/* Partial write or append - need to read existing data first */
+		/* Partial write or append */
 		char *slice_buffer = kmalloc(OUICHEFS_SLICE_SIZE, GFP_KERNEL);
-		if (!slice_buffer) {
-			ret = -ENOMEM;
-			goto cleanup;
-		}
+		if (!slice_buffer)
+			return -ENOMEM;
 		
-		/* Initialize buffer with zeros */
 		memset(slice_buffer, 0, OUICHEFS_SLICE_SIZE);
 		
-		/* Read existing data if file is not empty */
 		if (inode->i_size > 0) {
 			ssize_t read_ret = ouichefs_read_slice(sb, block_num, slice_num, 
 							       slice_buffer, inode->i_size);
 			if (read_ret < 0) {
 				pr_err("Failed to read existing slice data: %zd\n", read_ret);
 				kfree(slice_buffer);
-				ret = read_ret;
-				goto cleanup;
+				return read_ret;
 			}
 		}
 		
-		/* Check bounds for the write operation */
 		if (*pos + bytes_to_write > OUICHEFS_SLICE_SIZE) {
 			pr_err("Write would exceed slice boundaries\n");
 			kfree(slice_buffer);
-			ret = -EFBIG;
-			goto cleanup;
+			return -EFBIG;
 		}
 		
-		/* Copy new data into the buffer at the specified position */
 		memcpy(slice_buffer + *pos, kbuf, bytes_to_write);
 		
-		/* Write the updated buffer back to the slice */
 		size_t new_size = max((size_t)inode->i_size, (size_t)(*pos + bytes_to_write));
 		ret = ouichefs_write_slice(sb, block_num, slice_num, slice_buffer, new_size);
 		
@@ -531,171 +591,421 @@ static ssize_t ouichefs_write(struct file *file, const char __user *buf, size_t 
 		
 		if (ret < 0) {
 			pr_err("Failed to write updated slice: %zd\n", ret);
-			goto cleanup;
+			return ret;
 		}
 		
-		/* Update file size if we extended the file */
 		if (*pos + bytes_to_write > inode->i_size) {
 			inode->i_size = *pos + bytes_to_write;
 		}
 		
-		/* Return the number of bytes actually written by this operation */
 		ret = bytes_to_write;
 	}
 
-	/* Update file position */
+	/* Update file position and metadata */
 	*pos += bytes_to_write;
-
-	/* Update inode metadata */
-	inode->i_blocks = 0; /* Small files don't count blocks in traditional sense */
+	inode->i_blocks = 0; /* Small files don't count blocks */
 	inode->i_mtime = inode->i_ctime = current_time(inode);
 	mark_inode_dirty(inode);
 
-	pr_debug("Write completed: wrote %zd bytes, new file size=%lld, pos=%lld\n", 
-		 ret, (long long)inode->i_size, *pos);
+	pr_debug("Small file write completed: wrote %zd bytes, new file size=%lld\n", 
+		 ret, (long long)inode->i_size);
 
-cleanup:
-	kfree(kbuf);
 	return ret;
 }
 
 /*
-static ssize_t ouichefs_write(struct file *file, const char __user *buf, size_t len, loff_t *pos)
+ * Convert a small file from slice storage to traditional storage
+ */
+static ssize_t ouichefs_convert_to_traditional(struct inode *inode, const char *new_data, 
+					       size_t new_data_len, loff_t *pos)
 {
-	struct inode *inode = file->f_inode;
 	struct super_block *sb = inode->i_sb;
 	struct ouichefs_sb_info *sbi = OUICHEFS_SB(sb);
 	struct ouichefs_inode_info *ci = OUICHEFS_INODE(inode);
-	struct ouichefs_file_index_block *index;
+	uint32_t old_block_num = 0, old_slice_num = 0;
+	uint32_t new_index_block, first_data_block;
 	struct buffer_head *bh_index, *bh_data;
-	size_t total_written = 0;
+	struct ouichefs_file_index_block *index;
+	char *combined_data = NULL;
+	size_t old_data_size = inode->i_size;
+	size_t final_size = max((size_t)(*pos + new_data_len), old_data_size);
+	bool currently_uses_slices = false;
+	ssize_t ret;
 
-	if (*pos >= OUICHEFS_MAX_FILESIZE)
-		return -ENOSPC;
+	pr_info("Converting file to traditional storage: old_size=%zu, new_size=%zu\n", 
+		old_data_size, final_size);
 
-	// Copy data from user
-	char *kbuf = kmalloc(len, GFP_KERNEL);
-	if (!kbuf)
+	/* Check if the file currently uses slice storage */
+	if (old_data_size <= 128 && ci->index_block != 0) {
+		old_block_num = ouichefs_get_slice_block(ci->index_block);
+		old_slice_num = ouichefs_get_slice_number(ci->index_block);
+		currently_uses_slices = (old_block_num != 0 && old_slice_num != 0 && 
+					 old_slice_num < OUICHEFS_SLICES_PER_BLOCK);
+	}
+
+	pr_debug("File currently uses slices: %s (block=%u, slice=%u)\n", 
+		 currently_uses_slices ? "yes" : "no", old_block_num, old_slice_num);
+
+	/* Allocate buffer for combined data */
+	combined_data = kzalloc(final_size, GFP_KERNEL);
+	if (!combined_data)
 		return -ENOMEM;
 
-	if (copy_from_user(kbuf, buf, len)) {
-		kfree(kbuf);
-		return -EFAULT;
+	/* Read existing data */
+	if (old_data_size > 0) {
+		if (currently_uses_slices) {
+			/* Read from slice */
+			ret = ouichefs_read_slice(sb, old_block_num, old_slice_num, 
+						  combined_data, old_data_size);
+			if (ret < 0) {
+				pr_err("Failed to read old slice data: %zd\n", ret);
+				kfree(combined_data);
+				return ret;
+			}
+			pr_debug("Read %zd bytes from slice storage\n", old_data_size);
+		} else if (ci->index_block != 0) {
+			/* Read from traditional storage */
+			ret = ouichefs_read_traditional_file(inode, combined_data, old_data_size);
+			if (ret < 0) {
+				pr_err("Failed to read old traditional data: %zd\n", ret);
+				kfree(combined_data);
+				return ret;
+			}
+			pr_debug("Read %zd bytes from traditional storage\n", old_data_size);
+		}
 	}
-	pr_info("WRITE: len=%zu, data: %.6s\n", len, kbuf);
 
+	/* Merge new data into combined buffer */
+	if (*pos < final_size && new_data_len > 0) {
+		size_t copy_len = min(new_data_len, (size_t)(final_size - *pos));
+		memcpy(combined_data + *pos, new_data, copy_len);
+		pr_debug("Merged %zu bytes of new data at position %lld\n", copy_len, *pos);
+	}
 
-	bh_index = sb_bread(sb, ci->index_block);
-	if (!bh_index)
+	/* Free old storage if it uses slices */
+	if (currently_uses_slices) {
+		ouichefs_free_slice(sb, old_block_num, old_slice_num);
+		pr_debug("Freed old slice %u in block %u\n", old_slice_num, old_block_num);
+	} else if (old_data_size > 128 && ci->index_block != 0) {
+		/* File was already traditional - we need to free old blocks */
+		ouichefs_free_traditional_blocks(inode);
+		pr_debug("Freed old traditional blocks\n");
+	}
+
+	/* Allocate new index block (even if we had one before, start fresh) */
+	new_index_block = get_free_block(sbi);
+	if (!new_index_block) {
+		pr_err("Failed to allocate index block\n");
+		kfree(combined_data);
+		return -ENOSPC;
+	}
+
+	/* Initialize the index block */
+	bh_index = sb_bread(sb, new_index_block);
+	if (!bh_index) {
+		put_block(sbi, new_index_block);
+		kfree(combined_data);
 		return -EIO;
+	}
+	
 	index = (struct ouichefs_file_index_block *)bh_index->b_data;
+	memset(index, 0, OUICHEFS_BLOCK_SIZE);
 
-	while (total_written < len) {
-		sector_t iblock = *pos / OUICHEFS_BLOCK_SIZE;
-		unsigned long block_offset = *pos % OUICHEFS_BLOCK_SIZE;
-		unsigned long left_in_block = OUICHEFS_BLOCK_SIZE - block_offset;
-		unsigned long bytes_left = len - total_written;
-		unsigned long to_copy = min(left_in_block, bytes_left);
+	/* Calculate how many data blocks we need */
+	uint32_t blocks_needed = (final_size + OUICHEFS_BLOCK_SIZE - 1) / OUICHEFS_BLOCK_SIZE;
+	if (blocks_needed == 0) blocks_needed = 1; /* At least one block */
 
-		// Wenn der offset größer als das File ist, breche ab
-		if (iblock >= OUICHEFS_BLOCK_SIZE >> 2) {
+	pr_debug("Need %u data blocks for %zu bytes\n", blocks_needed, final_size);
+
+	/* Allocate and write data blocks */
+	size_t bytes_written = 0;
+	for (uint32_t i = 0; i < blocks_needed; i++) {
+		first_data_block = get_free_block(sbi);
+		if (!first_data_block) {
+			pr_err("Failed to allocate data block %u\n", i);
+			/* Clean up already allocated blocks */
+			for (uint32_t j = 0; j < i; j++) {
+				if (index->blocks[j] != 0) {
+					put_block(sbi, le32_to_cpu(index->blocks[j]));
+				}
+			}
 			brelse(bh_index);
-			return -EFBIG;
+			put_block(sbi, new_index_block);
+			kfree(combined_data);
+			return -ENOSPC;
 		}
 
-		uint32_t bno = le32_to_cpu(index->blocks[iblock]);
-		// Wenn der Block für das File nicht existiert
-		// (d.h. wir hinter EOF), dann wollen wir den neuen Block allozieren
-		// und die Leertasten die dazwischen entstehen (zwischen EOF und dem neuen Text)
-		// einfügen.
-		if (bno == 0) {
-			bno = get_free_block(sbi);
-			if (!bno) {
-				brelse(bh_index);
-				return -ENOSPC;
-			}
-			index->blocks[iblock] = cpu_to_le32(bno);
-			struct buffer_head *bh_new = sb_bread(sb, bno);
-			if (!bh_new) {
-				brelse(bh_index);
-				return -EIO;
-			}
-			memset(bh_new->b_data, 0, OUICHEFS_BLOCK_SIZE);
-			mark_buffer_dirty(bh_new);
-			sync_dirty_buffer(bh_new);
-			brelse(bh_new);
+		index->blocks[i] = cpu_to_le32(first_data_block);
 
-			mark_buffer_dirty(bh_index);
+		/* Write data to this block */
+		bh_data = sb_bread(sb, first_data_block);
+		if (!bh_data) {
+			pr_err("Failed to read data block %u\n", first_data_block);
+			put_block(sbi, first_data_block);
+			continue;
 		}
 
-		// Wenn die Block Nummer existiert, holen wir uns den Block und
-		// schreiben da rein
-		bh_data = sb_bread(sb, bno);
-		if (!bh_data)
-			break;
-
-		memcpy(bh_data->b_data + block_offset, kbuf + total_written, to_copy);
+		memset(bh_data->b_data, 0, OUICHEFS_BLOCK_SIZE);
+		
+		size_t bytes_to_copy = min((size_t)OUICHEFS_BLOCK_SIZE, final_size - bytes_written);
+		if (bytes_to_copy > 0) {
+			memcpy(bh_data->b_data, combined_data + bytes_written, bytes_to_copy);
+			bytes_written += bytes_to_copy;
+		}
 
 		mark_buffer_dirty(bh_data);
 		sync_dirty_buffer(bh_data);
 		brelse(bh_data);
 
-		*pos += to_copy;
-		total_written += to_copy;
+		pr_debug("Wrote %zu bytes to data block %u\n", bytes_to_copy, first_data_block);
+	}
 
-		if (*pos >= OUICHEFS_MAX_FILESIZE)
+	/* Save the index block */
+	mark_buffer_dirty(bh_index);
+	sync_dirty_buffer(bh_index);
+	brelse(bh_index);
+
+	/* Update inode to use traditional storage */
+	ci->index_block = new_index_block;
+	inode->i_size = final_size;
+	inode->i_blocks = blocks_needed + 1; /* +1 for index block */
+	*pos += (new_data_len <= final_size - *pos) ? new_data_len : (final_size - *pos);
+	inode->i_mtime = inode->i_ctime = current_time(inode);
+	mark_inode_dirty(inode);
+
+	kfree(combined_data);
+
+	pr_info("Conversion completed: file now uses traditional storage, size=%zu, blocks=%llu\n", 
+		final_size, inode->i_blocks);
+
+	return new_data_len;
+}
+
+/*
+ * Write to large files using traditional storage
+ * This handles appends and overwrites to files that already use index blocks
+ */
+static ssize_t ouichefs_write_large_file(struct inode *inode, const char *kbuf, 
+					 size_t bytes_to_write, loff_t *pos)
+{
+	struct super_block *sb = inode->i_sb;
+	struct ouichefs_sb_info *sbi = OUICHEFS_SB(sb);
+	struct ouichefs_inode_info *ci = OUICHEFS_INODE(inode);
+	struct ouichefs_file_index_block *index;
+	struct buffer_head *bh_index, *bh_data;
+	size_t bytes_written = 0;
+	size_t new_file_size;
+	uint32_t blocks_needed, blocks_allocated;
+
+	pr_debug("Writing %zu bytes to large file at position %lld\n", bytes_to_write, *pos);
+
+	/* Calculate new file size */
+	new_file_size = max((size_t)inode->i_size, (size_t)(*pos + bytes_to_write));
+
+	/* Read the index block */
+	bh_index = sb_bread(sb, ci->index_block);
+	if (!bh_index) {
+		pr_err("Failed to read index block %u\n", ci->index_block);
+		return -EIO;
+	}
+	index = (struct ouichefs_file_index_block *)bh_index->b_data;
+
+	/* Calculate how many blocks we need for the new file size */
+	blocks_needed = (new_file_size + OUICHEFS_BLOCK_SIZE - 1) / OUICHEFS_BLOCK_SIZE;
+	blocks_allocated = inode->i_blocks - 1; /* Subtract index block */
+
+	pr_debug("Current blocks: %u, needed blocks: %u\n", blocks_allocated, blocks_needed);
+
+	/* Allocate additional blocks if needed */
+	if (blocks_needed > blocks_allocated) {
+		uint32_t blocks_to_allocate = blocks_needed - blocks_allocated;
+		
+		if (blocks_to_allocate > sbi->nr_free_blocks) {
+			pr_err("Not enough free blocks (need %u, have %u)\n", 
+			       blocks_to_allocate, sbi->nr_free_blocks);
+			brelse(bh_index);
+			return -ENOSPC;
+		}
+
+		/* Allocate new data blocks */
+		for (uint32_t i = blocks_allocated; i < blocks_needed; i++) {
+			uint32_t new_block = get_free_block(sbi);
+			if (!new_block) {
+				pr_err("Failed to allocate block %u\n", i);
+				brelse(bh_index);
+				return -ENOSPC;
+			}
+			
+			index->blocks[i] = cpu_to_le32(new_block);
+			
+			/* Initialize the new block with zeros */
+			bh_data = sb_bread(sb, new_block);
+			if (bh_data) {
+				memset(bh_data->b_data, 0, OUICHEFS_BLOCK_SIZE);
+				mark_buffer_dirty(bh_data);
+				sync_dirty_buffer(bh_data);
+				brelse(bh_data);
+			}
+			
+			pr_debug("Allocated new data block %u at index %u\n", new_block, i);
+		}
+		
+		/* Update the index block */
+		mark_buffer_dirty(bh_index);
+		sync_dirty_buffer(bh_index);
+	}
+
+	/* Write the data block by block */
+	while (bytes_written < bytes_to_write) {
+		uint32_t block_index = (*pos + bytes_written) / OUICHEFS_BLOCK_SIZE;
+		uint32_t block_offset = (*pos + bytes_written) % OUICHEFS_BLOCK_SIZE;
+		uint32_t bytes_in_block = min((size_t)(OUICHEFS_BLOCK_SIZE - block_offset), 
+					      bytes_to_write - bytes_written);
+		
+		if (block_index >= blocks_needed) {
+			pr_err("Block index %u exceeds allocated blocks %u\n", block_index, blocks_needed);
 			break;
+		}
+		
+		uint32_t data_block = le32_to_cpu(index->blocks[block_index]);
+		if (data_block == 0) {
+			pr_err("Data block %u not allocated\n", block_index);
+			break;
+		}
+		
+		/* Read the data block */
+		bh_data = sb_bread(sb, data_block);
+		if (!bh_data) {
+			pr_err("Failed to read data block %u\n", data_block);
+			break;
+		}
+		
+		/* Write data to the block */
+		memcpy(bh_data->b_data + block_offset, kbuf + bytes_written, bytes_in_block);
+		
+		mark_buffer_dirty(bh_data);
+		sync_dirty_buffer(bh_data);
+		brelse(bh_data);
+		
+		bytes_written += bytes_in_block;
+		
+		pr_debug("Wrote %u bytes to block %u at offset %u\n", 
+			 bytes_in_block, data_block, block_offset);
 	}
 
 	brelse(bh_index);
 
-	// Aktualisiere EOF
-	if (*pos > inode->i_size)
-		inode->i_size = *pos;
-
-
-
-	// AB HIER NOCH SCHAUEN, DER REST SOLLTE EIGENTLICH STIMMEN!!!!!
-	uint32_t nr_blocks_old = inode->i_blocks;
-
-	// Update inode metadata
-	inode->i_blocks = roundup(inode->i_size, OUICHEFS_BLOCK_SIZE) / OUICHEFS_BLOCK_SIZE;
-	inode->i_mtime = inode->i_ctime = current_time(inode);
-	mark_inode_dirty(inode);
-
-	// If file is smaller than before, free unused blocks
-	if (nr_blocks_old > inode->i_blocks) {
-		int i;
-		struct buffer_head *bh_index;
-		struct ouichefs_file_index_block *index;
-
-		// Free unused blocks from page cache 
-		truncate_pagecache(inode, inode->i_size);
-
-		// Read index block to remove unused blocks
-		bh_index = sb_bread(sb, ci->index_block);
-		if (!bh_index) {
-			pr_err("failed truncating '%s'. we just lost %llu blocks\n",
-					file->f_path.dentry->d_name.name,
-					nr_blocks_old - inode->i_blocks);
-			goto end;
+	if (bytes_written > 0) {
+		/* Update file metadata */
+		*pos += bytes_written;
+		if (*pos > inode->i_size) {
+			inode->i_size = *pos;
 		}
-		index = (struct ouichefs_file_index_block *)
-				bh_index->b_data;
-
-		for (i = inode->i_blocks - 1; i < nr_blocks_old - 1; i++) {
-			put_block(OUICHEFS_SB(sb), le32_to_cpu(index->blocks[i]));
-			index->blocks[i] = 0;
-		}
-		mark_buffer_dirty(bh_index);
-		brelse(bh_index);
+		inode->i_blocks = blocks_needed + 1; /* +1 for index block */
+		inode->i_mtime = inode->i_ctime = current_time(inode);
+		mark_inode_dirty(inode);
+		
+		pr_debug("Large file write completed: %zu bytes, new size=%lld, blocks=%llu\n", 
+			 bytes_written, (long long)inode->i_size, inode->i_blocks);
 	}
 
-	end:
-		kfree(kbuf);
-		return total_written;
+	return bytes_written;
 }
-*/
+	
+/*
+ * Read data from a traditional file (using index blocks)
+ */
+static ssize_t ouichefs_read_traditional_file(struct inode *inode, char *buffer, size_t size)
+{
+	struct super_block *sb = inode->i_sb;
+	struct ouichefs_inode_info *ci = OUICHEFS_INODE(inode);
+	struct ouichefs_file_index_block *index;
+	struct buffer_head *bh_index, *bh_data;
+	size_t bytes_read = 0;
+	size_t bytes_to_read = min(size, (size_t)inode->i_size);
+
+	if (ci->index_block == 0 || bytes_to_read == 0) {
+		return 0;
+	}
+
+	/* Read the index block */
+	bh_index = sb_bread(sb, ci->index_block);
+	if (!bh_index) {
+		pr_err("Failed to read index block %u\n", ci->index_block);
+		return -EIO;
+	}
+	index = (struct ouichefs_file_index_block *)bh_index->b_data;
+
+	/* Read data block by block */
+	while (bytes_read < bytes_to_read) {
+		uint32_t block_index = bytes_read / OUICHEFS_BLOCK_SIZE;
+		uint32_t block_offset = bytes_read % OUICHEFS_BLOCK_SIZE;
+		uint32_t bytes_in_block = min((size_t)(OUICHEFS_BLOCK_SIZE - block_offset), 
+					      bytes_to_read - bytes_read);
+		
+		uint32_t data_block = le32_to_cpu(index->blocks[block_index]);
+		if (data_block == 0) {
+			pr_debug("Unallocated block at index %u, stopping read\n", block_index);
+			break;
+		}
+		
+		/* Read the data block */
+		bh_data = sb_bread(sb, data_block);
+		if (!bh_data) {
+			pr_err("Failed to read data block %u\n", data_block);
+			break;
+		}
+		
+		/* Copy data from the block */
+		memcpy(buffer + bytes_read, bh_data->b_data + block_offset, bytes_in_block);
+		
+		brelse(bh_data);
+		bytes_read += bytes_in_block;
+	}
+
+	brelse(bh_index);
+	return bytes_read;
+}
+
+/*
+ * Free all data blocks used by a traditional file
+ */
+static void ouichefs_free_traditional_blocks(struct inode *inode)
+{
+	struct super_block *sb = inode->i_sb;
+	struct ouichefs_sb_info *sbi = OUICHEFS_SB(sb);
+	struct ouichefs_inode_info *ci = OUICHEFS_INODE(inode);
+	struct ouichefs_file_index_block *index;
+	struct buffer_head *bh_index;
+	uint32_t blocks_to_free = inode->i_blocks - 1; /* Subtract index block */
+
+	if (ci->index_block == 0) {
+		return;
+	}
+
+	/* Read the index block */
+	bh_index = sb_bread(sb, ci->index_block);
+	if (!bh_index) {
+		pr_err("Failed to read index block %u for cleanup\n", ci->index_block);
+		return;
+	}
+	index = (struct ouichefs_file_index_block *)bh_index->b_data;
+
+	/* Free all data blocks */
+	for (uint32_t i = 0; i < blocks_to_free; i++) {
+		uint32_t data_block = le32_to_cpu(index->blocks[i]);
+		if (data_block != 0) {
+			put_block(sbi, data_block);
+			pr_debug("Freed traditional data block %u\n", data_block);
+		}
+	}
+
+	brelse(bh_index);
+	
+	/* Free the index block */
+	put_block(sbi, ci->index_block);
+	pr_debug("Freed traditional index block %u\n", ci->index_block);
+}
 
 /* IOCTL implementation */
 

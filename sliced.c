@@ -135,6 +135,7 @@ uint32_t ouichefs_alloc_slice(struct super_block *sb, uint32_t *slice_num)
 
 /**
  * Free a slice and potentially add the block back to the partially filled list
+ * If all slices become free, return the block to the general pool
  */
 void ouichefs_free_slice(struct super_block *sb, uint32_t block_num, uint32_t slice_num)
 {
@@ -143,9 +144,11 @@ void ouichefs_free_slice(struct super_block *sb, uint32_t block_num, uint32_t sl
 	struct ouichefs_sliced_block_meta *meta;
 	uint32_t bitmap;
 	bool was_full;
+	int free_data_slices;
 
 	if (slice_num == 0 || slice_num >= OUICHEFS_SLICES_PER_BLOCK) {
-		pr_err("Invalid slice number %u\n", slice_num);
+				pr_err("Invalid slice number %u (valid range: 1-%d)\n", 
+						slice_num, OUICHEFS_SLICES_PER_BLOCK - 1);
 		return;
 	}
 
@@ -159,40 +162,62 @@ void ouichefs_free_slice(struct super_block *sb, uint32_t block_num, uint32_t sl
 
 	/* Verify this is a sliced block */
 	if (le32_to_cpu(meta->magic) != OUICHEFS_SLICED_MAGIC) {
-		pr_err("Block %u is not a valid sliced block\n", block_num);
+		pr_err("Block %u is not a valid sliced block (magic=0x%x, expected=0x%x)\n", 
+				block_num, le32_to_cpu(meta->magic), OUICHEFS_SLICED_MAGIC);
 		brelse(bh);
 		return;
 	}
 
 	bitmap = le32_to_cpu(meta->slice_bitmap);
-	was_full = (bitmap == 0);
+	was_full = (bitmap == 0); /* All data slices were occupied */
+
+	/* Check if slice is already free */
+	if (bitmap & (1U << slice_num)) {
+		pr_warn("Slice %u in block %u is already free\n", slice_num, block_num);
+		brelse(bh);
+		return;
+	}
 
 	/* Free the slice by setting the bit */
 	bitmap |= (1U << slice_num);
 	meta->slice_bitmap = cpu_to_le32(bitmap);
 
+	/* Count free data slices (excluding metadata slice 0) */
+	free_data_slices = 0;
+	for (int i = 1; i < OUICHEFS_SLICES_PER_BLOCK; i++) {
+		if (bitmap & (1U << i))
+			free_data_slices++;
+	}
 	/* If block was full and now has free space, add it to partially filled list */
-	if (was_full) {
+	if (was_full && free_data_slices > 0) {
+		pr_debug("Block %u was full, adding to partially filled list\n", block_num);
 		meta->next_block = cpu_to_le32(sbi->s_free_sliced_blocks);
 		sbi->s_free_sliced_blocks = block_num;
 	}
 
-	/* If all data slices are now free (only metadata slice occupied),
-	   remove from partially filled list and return block to general pool */
-	if (bitmap == 0xFFFFFFFE) {
+	/* If all data slices are now free, remove from partially filled list and return to general pool */
+	if (free_data_slices == (OUICHEFS_SLICES_PER_BLOCK - 1)) {
+		pr_debug("All data slices free, returning block %u to general pool\n", block_num);
+		
 		/* Remove from partially filled list */
 		if (sbi->s_free_sliced_blocks == block_num) {
+			/* Block is head of the list */
 			sbi->s_free_sliced_blocks = le32_to_cpu(meta->next_block);
+			pr_debug("Removed block %u from head of partially filled list\n", block_num);
 		} else {
-			/* Need to find and update the previous block in the list */
+			/* Find and update the previous block in the list */
 			uint32_t prev_block = sbi->s_free_sliced_blocks;
 			struct buffer_head *prev_bh;
 			struct ouichefs_sliced_block_meta *prev_meta;
+			bool found = false;
 
 			while (prev_block != 0) {
 				prev_bh = sb_bread(sb, prev_block);
-				if (!prev_bh)
+				if (!prev_bh) {
+					pr_err("Failed to read block %u while searching partially filled list\n", 
+					       prev_block);
 					break;
+				}
 
 				prev_meta = (struct ouichefs_sliced_block_meta *)prev_bh->b_data;
 				if (le32_to_cpu(prev_meta->next_block) == block_num) {
@@ -200,11 +225,19 @@ void ouichefs_free_slice(struct super_block *sb, uint32_t block_num, uint32_t sl
 					mark_buffer_dirty(prev_bh);
 					sync_dirty_buffer(prev_bh);
 					brelse(prev_bh);
+					found = true;
+					pr_debug("Updated previous block %u to skip block %u\n", 
+						 prev_block, block_num);
 					break;
 				}
 
 				prev_block = le32_to_cpu(prev_meta->next_block);
 				brelse(prev_bh);
+			}
+
+			if (!found) {
+				pr_warn("Block %u not found in partially filled list during removal\n", 
+					block_num);
 			}
 		}
 
@@ -215,10 +248,11 @@ void ouichefs_free_slice(struct super_block *sb, uint32_t block_num, uint32_t sl
 		brelse(bh);
 
 		put_block(sbi, block_num);
-		pr_debug("Returned empty sliced block %u to general pool\n", block_num);
+		pr_info("Returned empty sliced block %u to general pool\n", block_num);
 		return;
 	}
 
+	/* Save the updated metadata */
 	mark_buffer_dirty(bh);
 	sync_dirty_buffer(bh);
 	brelse(bh);
