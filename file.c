@@ -342,13 +342,50 @@ static int ouichefs_open(struct inode *inode, struct file *file)
 static ssize_t ouichefs_read(struct file *file, char __user *buf, size_t len, loff_t *pos)
 {
 	struct inode *inode = file->f_inode;
+	struct super_block *sb = inode->i_sb;
+	struct ouichefs_inode_info *ci = OUICHEFS_INODE(inode);
 
 	if (*pos >= inode->i_size)
 		return 0;  // EOF: no more data to read
 
-	struct super_block *sb = inode->i_sb;
+	/* Handle small files using sliced blocks */
+	if (ouichefs_is_small_file(inode->i_size)) {
+		uint32_t block_num = ouichefs_get_slice_block(ci->index_block);
+		uint32_t slice_num = ouichefs_get_slice_number(ci->index_block);
+		size_t bytes_to_read = min(len, (size_t)(inode->i_size - *pos));
+		char *kbuf;
+		int ret;
+
+		if (block_num == 0 || slice_num == 0) {
+			pr_err("Invalid slice location for small file\n");
+			return -EIO;
+		}
+
+		kbuf = kmalloc(bytes_to_read, GFP_KERNEL);
+		if (!kbuf)
+			return -ENOMEM;
+
+		ret = ouichefs_read_slice(sb, block_num, slice_num, kbuf, bytes_to_read);
+		if (ret < 0) {
+			kfree(kbuf);
+			return ret;
+		}
+
+		if (copy_to_user(buf, kbuf, ret)) {
+			kfree(kbuf);
+			return -EFAULT;
+		}
+
+		*pos += ret;
+		kfree(kbuf);
+		
+		pr_debug("Read %d bytes from small file (slice %u in block %u)\n", 
+			 ret, slice_num, block_num);
+		return ret;
+	}
+
+	/* Handle regular files with existing logic */
 	struct buffer_head *bh, *bh_index;
-	struct ouichefs_inode_info *ci = OUICHEFS_INODE(inode);
 	struct ouichefs_file_index_block *index;
 	unsigned long block_num;
 	unsigned long block_offset;
@@ -409,7 +446,7 @@ static ssize_t ouichefs_read(struct file *file, char __user *buf, size_t len, lo
 		if (*pos >= inode->i_size)
 			break;
     }
-	pr_info("READ: total_copied=%zu, data: %.6s\n", total_copied, kbuf);
+	pr_debug("READ: total_copied=%zu, data: %.6s\n", total_copied, kbuf);
 
 	if (copy_to_user(buf, kbuf, total_copied)) {
 		kfree(kbuf);
