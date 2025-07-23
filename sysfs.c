@@ -13,6 +13,8 @@
 #include <linux/sysfs.h>
 #include <linux/kobject.h>
 #include <linux/buffer_head.h>
+#include <linux/hashtable.h>
+#include <linux/writeback.h>
 
 #include "ouichefs.h"
 #include "ouichefs_sliced.h"
@@ -20,7 +22,7 @@
 
 /* Global variables for sysfs */
 static struct kobject *ouichefs_kobj;
-static struct kobject *partition_kobj;
+//static struct kobject *partition_kobj;
 
 /* Statistics structure */
 struct ouichefs_stats {
@@ -43,12 +45,12 @@ struct ouichefs_stats {
 
 /* Forward declarations */
 static int ouichefs_collect_stats(struct super_block *sb, struct ouichefs_stats *stats);
-static struct super_block *ouichefs_get_sb(void);
+static struct super_block *ouichefs_get_sb_from_kobj(struct kobject *kobj);
 
 /* SysFS show functions */
 static ssize_t other_stats_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
 {
-	struct super_block *sb = ouichefs_get_sb();
+	struct super_block *sb = ouichefs_get_sb_from_kobj(kobj);
 	struct ouichefs_stats stats;
 	int ret;
 
@@ -73,7 +75,7 @@ static ssize_t other_stats_show(struct kobject *kobj, struct kobj_attribute *att
 /* SysFS show functions */
 static ssize_t free_blocks_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
 {
-	struct super_block *sb = ouichefs_get_sb();
+	struct super_block *sb = ouichefs_get_sb_from_kobj(kobj);
 	struct ouichefs_stats stats;
 	int ret;
 
@@ -89,7 +91,7 @@ static ssize_t free_blocks_show(struct kobject *kobj, struct kobj_attribute *att
 
 static ssize_t used_blocks_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
 {
-	struct super_block *sb = ouichefs_get_sb();
+	struct super_block *sb = ouichefs_get_sb_from_kobj(kobj);
 	struct ouichefs_stats stats;
 	int ret;
 
@@ -105,7 +107,7 @@ static ssize_t used_blocks_show(struct kobject *kobj, struct kobj_attribute *att
 
 static ssize_t sliced_blocks_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
 {
-	struct super_block *sb = ouichefs_get_sb();
+	struct super_block *sb = ouichefs_get_sb_from_kobj(kobj);
 	struct ouichefs_stats stats;
 	int ret;
 
@@ -121,7 +123,7 @@ static ssize_t sliced_blocks_show(struct kobject *kobj, struct kobj_attribute *a
 
 static ssize_t total_free_slices_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
 {
-	struct super_block *sb = ouichefs_get_sb();
+	struct super_block *sb = ouichefs_get_sb_from_kobj(kobj);
 	struct ouichefs_stats stats;
 	int ret;
 
@@ -137,7 +139,7 @@ static ssize_t total_free_slices_show(struct kobject *kobj, struct kobj_attribut
 
 static ssize_t files_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
 {
-	struct super_block *sb = ouichefs_get_sb();
+	struct super_block *sb = ouichefs_get_sb_from_kobj(kobj);
 	struct ouichefs_stats stats;
 	int ret;
 
@@ -153,7 +155,7 @@ static ssize_t files_show(struct kobject *kobj, struct kobj_attribute *attr, cha
 
 static ssize_t small_files_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
 {
-	struct super_block *sb = ouichefs_get_sb();
+	struct super_block *sb = ouichefs_get_sb_from_kobj(kobj);
 	struct ouichefs_stats stats;
 	int ret;
 
@@ -169,7 +171,7 @@ static ssize_t small_files_show(struct kobject *kobj, struct kobj_attribute *att
 
 static ssize_t total_data_size_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
 {
-	struct super_block *sb = ouichefs_get_sb();
+	struct super_block *sb = ouichefs_get_sb_from_kobj(kobj);
 	struct ouichefs_stats stats;
 	int ret;
 
@@ -185,7 +187,7 @@ static ssize_t total_data_size_show(struct kobject *kobj, struct kobj_attribute 
 
 static ssize_t total_used_size_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
 {
-	struct super_block *sb = ouichefs_get_sb();
+	struct super_block *sb = ouichefs_get_sb_from_kobj(kobj);
 	struct ouichefs_stats stats;
 	int ret;
 
@@ -201,7 +203,7 @@ static ssize_t total_used_size_show(struct kobject *kobj, struct kobj_attribute 
 
 static ssize_t efficiency_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
 {
-	struct super_block *sb = ouichefs_get_sb();
+	struct super_block *sb = ouichefs_get_sb_from_kobj(kobj);
 	struct ouichefs_stats stats;
 	int ret;
 
@@ -248,22 +250,53 @@ static struct attribute_group ouichefs_attr_group = {
 };
 
 /* Global superblock pointer for sysfs access */
-static struct super_block *g_sb;
+//static struct super_block *g_sb;
 
-static struct super_block *ouichefs_get_sb(void)
+// Instead of a single global sb, maintain a hash table of mounted filesystems
+#define OUICHEFS_SYSFS_HASH_BITS 4  /* 16 buckets should be plenty */
+
+struct ouichefs_sysfs_entry {
+    struct super_block *sb;
+    char device_name[32];
+    struct kobject *kobj;        // Pointer, not embedded
+    struct hlist_node hash_node;
+};
+
+static DEFINE_HASHTABLE(ouichefs_sysfs_hash, OUICHEFS_SYSFS_HASH_BITS);
+static DEFINE_MUTEX(ouichefs_sysfs_mutex);
+
+static inline u32 ouichefs_sb_hash(struct super_block *sb)
 {
-	return g_sb;
+    /* Simple hash based on superblock pointer */
+    return hash_ptr(sb, OUICHEFS_SYSFS_HASH_BITS);
 }
 
+static struct super_block *ouichefs_get_sb_from_kobj(struct kobject *kobj)
+{
+    struct ouichefs_sysfs_entry *entry;
+    u32 hash;
+    
+    // Find the entry that owns this kobject
+    mutex_lock(&ouichefs_sysfs_mutex);
+    hash_for_each(ouichefs_sysfs_hash, hash, entry, hash_node) {
+        if (entry->kobj == kobj) {
+            mutex_unlock(&ouichefs_sysfs_mutex);
+            return entry->sb;
+        }
+    }
+    mutex_unlock(&ouichefs_sysfs_mutex);
+    return NULL;
+}
+/*
 void ouichefs_sysfs_set_sb(struct super_block *sb)
 {
 	g_sb = sb;
-}
-
+}*/
+/*
 void ouichefs_sysfs_clear_sb(void)
 {
 	g_sb = NULL;
-}
+}*/
 
 /**
  * Count sliced blocks and free slices
@@ -433,6 +466,9 @@ static int ouichefs_count_file_stats(struct super_block *sb, uint32_t *files, ui
  */
 static int ouichefs_collect_stats(struct super_block *sb, struct ouichefs_stats *stats)
 {
+	// Force any pending writes to complete
+    //sync_inodes_sb(sb);
+
 	struct ouichefs_sb_info *sbi = OUICHEFS_SB(sb);
 	int ret;
 
@@ -456,15 +492,21 @@ static int ouichefs_collect_stats(struct super_block *sb, struct ouichefs_stats 
 	                            sbi->nr_ifree_blocks - sbi->nr_bfree_blocks;
 	stats->used_blocks = total_data_blocks - sbi->nr_free_blocks;
 
+	//sync_inodes_sb(sb);
+
 	/* Sliced block statistics */
 	ret = ouichefs_count_sliced_stats(sb, &stats->sliced_blocks, &stats->total_free_slices);
 	if (ret)
 		return ret;
 
+	//sync_inodes_sb(sb);
+
 	/* File statistics */
 	ret = ouichefs_count_file_stats(sb, &stats->files, &stats->small_files, &stats->total_data_size);
 	if (ret)
 		return ret;
+
+	//sync_inodes_sb(sb);
 
 	/* Calculate total used size */
 	stats->total_used_size = (uint64_t)stats->used_blocks * OUICHEFS_BLOCK_SIZE;
@@ -503,48 +545,81 @@ int ouichefs_sysfs_init(void)
  */
 int ouichefs_sysfs_create_partition(struct super_block *sb, const char *partition_name)
 {
-	int ret;
+    struct ouichefs_sysfs_entry *entry;
+    u32 hash;
+    int ret;
 
-	if (!ouichefs_kobj) {
-		pr_err("OuiChefs sysfs not initialized\n");
-		return -EINVAL;
-	}
+    pr_info("Creating sysfs partition for %s\n", partition_name);
 
-	/* Create /sys/fs/ouichefs/<partition> */
-	partition_kobj = kobject_create_and_add(partition_name, ouichefs_kobj);
-	if (!partition_kobj) {
-		pr_err("Failed to create partition sysfs directory\n");
-		return -ENOMEM;
-	}
+    if (!ouichefs_kobj) {
+        pr_err("OuiChefs sysfs not initialized\n");
+        return -EINVAL;
+    }
 
-	/* Create sysfs files */
-	ret = sysfs_create_group(partition_kobj, &ouichefs_attr_group);
-	if (ret) {
-		pr_err("Failed to create sysfs attributes\n");
-		kobject_put(partition_kobj);
-		partition_kobj = NULL;
-		return ret;
-	}
+    entry = kmalloc(sizeof(*entry), GFP_KERNEL);
+    if (!entry) {
+        pr_err("Failed to allocate sysfs entry\n");
+        return -ENOMEM;
+    }
 
-	/* Set the superblock for this partition */
-	ouichefs_sysfs_set_sb(sb);
+    entry->sb = sb;
+    strncpy(entry->device_name, partition_name, sizeof(entry->device_name) - 1);
+    entry->device_name[sizeof(entry->device_name) - 1] = '\0';
 
-	pr_info("Created sysfs interface for partition %s\n", partition_name);
-	return 0;
+    /* Create a simple subdirectory first */
+    entry->kobj = kobject_create_and_add(partition_name, ouichefs_kobj);
+    if (!entry->kobj) {
+        pr_err("Failed to create kobject for %s\n", partition_name);
+        kfree(entry);
+        return -ENOMEM;
+    }
+
+    pr_info("Created kobject directory\n");
+
+    /* Create sysfs attribute files */
+    ret = sysfs_create_group(entry->kobj, &ouichefs_attr_group);
+    if (ret) {
+        pr_err("Failed to create sysfs attributes: %d\n", ret);
+        kobject_put(entry->kobj);
+        kfree(entry);
+        return ret;
+    }
+
+    pr_info("Created sysfs attributes\n");
+
+    /* Add to hash table */
+    hash = ouichefs_sb_hash(sb);
+    mutex_lock(&ouichefs_sysfs_mutex);
+    hash_add(ouichefs_sysfs_hash, &entry->hash_node, hash);
+    mutex_unlock(&ouichefs_sysfs_mutex);
+
+    pr_info("Created sysfs interface for partition %s\n", partition_name);
+    return 0;
 }
 
 /**
  * Remove partition-specific sysfs directory
  */
-void ouichefs_sysfs_remove_partition(void)
+void ouichefs_sysfs_remove_partition(struct super_block *sb)
 {
-	if (partition_kobj) {
-		sysfs_remove_group(partition_kobj, &ouichefs_attr_group);
-		kobject_put(partition_kobj);
-		partition_kobj = NULL;
-	}
+    struct ouichefs_sysfs_entry *entry;
+    u32 hash = ouichefs_sb_hash(sb);
 
-	ouichefs_sysfs_clear_sb();
+    mutex_lock(&ouichefs_sysfs_mutex);
+    hash_for_each_possible(ouichefs_sysfs_hash, entry, hash_node, hash) {
+        if (entry->sb == sb) {
+            hash_del(&entry->hash_node);  // Remove from hash table FIRST
+            mutex_unlock(&ouichefs_sysfs_mutex);
+            
+            sysfs_remove_group(entry->kobj, &ouichefs_attr_group);
+            kobject_put(entry->kobj);  // This will eventually call kfree(entry)
+            pr_info("Removed sysfs interface for partition %s\n", entry->device_name);
+            return;
+        }
+    }
+    mutex_unlock(&ouichefs_sysfs_mutex);
+    
+    pr_warn("Superblock not found in sysfs hash table\n");
 }
 
 /**
@@ -552,12 +627,25 @@ void ouichefs_sysfs_remove_partition(void)
  */
 void ouichefs_sysfs_exit(void)
 {
-	ouichefs_sysfs_remove_partition();
+    struct ouichefs_sysfs_entry *entry;
+    struct hlist_node *tmp;
+    int bkt;
 
-	if (ouichefs_kobj) {
-		kobject_put(ouichefs_kobj);
-		ouichefs_kobj = NULL;
-	}
+    /* Clean up all remaining entries */
+    mutex_lock(&ouichefs_sysfs_mutex);
+    hash_for_each_safe(ouichefs_sysfs_hash, bkt, tmp, entry, hash_node) {
+        hash_del(&entry->hash_node);
+        sysfs_remove_group(entry->kobj, &ouichefs_attr_group);
+        kobject_put(entry->kobj);
+        pr_info("Cleaned up sysfs interface for partition %s\n", entry->device_name);
+        //kfree(entry);
+    }
+    mutex_unlock(&ouichefs_sysfs_mutex);
 
-	pr_info("OuiChefs sysfs interface removed\n");
+    if (ouichefs_kobj) {
+        kobject_put(ouichefs_kobj);
+        ouichefs_kobj = NULL;
+    }
+
+    pr_info("OuiChefs sysfs interface removed\n");
 }

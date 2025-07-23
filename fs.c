@@ -74,8 +74,8 @@ struct dentry *ouichefs_mount(struct file_system_type *fs_type, int flags,
  */
 void ouichefs_kill_sb(struct super_block *sb)
 {
-	/* Remove sysfs entries */
-	ouichefs_sysfs_remove_partition();
+	/* Remove sysfs entries for this specific superblock */
+	ouichefs_sysfs_remove_partition(sb);
 
 	kill_block_super(sb);
 
