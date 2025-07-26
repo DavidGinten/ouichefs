@@ -416,6 +416,8 @@ check_spanning_multiple_slices() {
 	variable_slices="$sysfs/vdb/sliced_blocks"
 
 	dd if=/dev/urandom of=$mntb/file1 bs=100 count=1 2>/dev/null
+	sleep 1
+	sync
 
 	if ! used_before=$(cat $variable_used); then
 		exit_fail "error while reading ${variable_used}!"
@@ -432,6 +434,8 @@ check_spanning_multiple_slices() {
 
 	dd if=/dev/urandom of=$mntb/file2 bs=100 count=1 oflag=append conv=notrunc 2>/dev/null
 	dd if=/dev/urandom of=$mntb/file2 bs=128 count=1 oflag=append conv=notrunc 2>/dev/null
+	sleep 1
+	sync
 
 	if ! used_after=$(cat $variable_used); then
 		exit_fail "error while reading ${variable_used}!"
@@ -446,16 +450,16 @@ check_spanning_multiple_slices() {
 		exit_fail "error while reading ${variable_small_files}!"
 	fi
 	if ! [ "$((free_slices_before - 2))" -eq "$free_slices_after"  ]; then
-		exit_fail ">>error while counting $variable_free_slices: $free_slices_before $free_slices_after"
+		exit_fail ">error while counting $variable_free_slices: $free_slices_before $free_slices_after"
 	fi
 	if ! [ "$used_before" -eq "$used_after"  ]; then
-		exit_fail ">>error while counting $variable_used: $used_before $used_after"
+		exit_fail ">error while counting $variable_used: $used_before $used_after"
 	fi
-	if ! [ "$((small_files_before + 1))" -eq "$small_files_after"  ]; then
-		exit_fail ">>error while counting $variable_small_files: $small_files_before $small_files_after"
+	if ! [ "$((small_files_before))" -eq "$small_files_after"  ]; then
+		exit_fail ">error while counting $variable_small_files: $small_files_before $small_files_after"
 	fi
 	if ! [ "$((slices_after))" -eq "$slices_before"  ]; then
-		exit_fail ">>error while counting $variable_slices: $slices_before $slices_after"
+		exit_fail ">error while counting $variable_slices: $slices_before $slices_after"
 	fi
 
 	if ! slices_before=$(cat $variable_slices); then
@@ -471,6 +475,8 @@ check_spanning_multiple_slices() {
 	dd if=/dev/urandom of=$mntb/file2 bs=128 count=1 oflag=append conv=notrunc 2>/dev/null
 	dd if=/dev/urandom of=$mntb/file2 bs=128 count=1 oflag=append conv=notrunc 2>/dev/null
 	dd if=/dev/urandom of=$mntb/file2 bs=128 count=1 oflag=append conv=notrunc 2>/dev/null
+	sleep 1
+	sync
 
 	if ! slices_after=$(cat $variable_slices); then
 		exit_fail "error while reading ${variable_slices}!"
@@ -535,6 +541,8 @@ echo "checking files spanning multiple slices...OK"
 echo "checking ouichefs basic behavior (again)..."
 check_ouichefs_basic_behavior
 echo "checking ouichefs basic behavior (again)... OK"
+
+echo "Scanning for memory leaks ..."
 
 echo scan > /sys/kernel/debug/kmemleak
 sleep 60

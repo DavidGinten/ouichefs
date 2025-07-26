@@ -30,15 +30,6 @@ struct ouichefs_sliced_block_meta {
 	uint32_t reserved[29];
 };
 
-/* Color codes for output */
-#define COLOR_RESET     "\033[0m"
-#define COLOR_RED       "\033[31m"
-#define COLOR_GREEN     "\033[32m"
-#define COLOR_YELLOW    "\033[33m"
-#define COLOR_BLUE      "\033[34m"
-#define COLOR_MAGENTA   "\033[35m"
-#define COLOR_CYAN      "\033[36m"
-#define COLOR_BOLD      "\033[1m"
 
 /**
  * Convert a character to a printable representation
@@ -68,29 +59,7 @@ void display_slice(int slice_num, const char *slice_data, int highlight_slice)
 	}
 	formatted[OUICHEFS_SLICE_SIZE] = '\0';
 	
-	/* Choose color based on slice type and content */
-	const char *color = COLOR_RESET;
-	if (slice_num == 0) {
-		color = COLOR_CYAN COLOR_BOLD;  /* Metadata slice */
-	} else if (slice_num == highlight_slice) {
-		color = COLOR_GREEN COLOR_BOLD;  /* File's slice */
-	} else {
-		/* Check if slice has data */
-		int has_data = 0;
-		for (i = 0; i < OUICHEFS_SLICE_SIZE; i++) {
-			if (slice_data[i] != 0) {
-				has_data = 1;
-				break;
-			}
-		}
-		if (has_data) {
-			color = COLOR_YELLOW;  /* Other slices with data */
-		} else {
-			color = COLOR_RESET;   /* Empty slices */
-		}
-	}
-	
-	printf("%s[%02d] %s%s\n", color, slice_num, formatted, COLOR_RESET);
+	printf("[%02d] %s\n", slice_num, formatted);
 }
 
 /**
@@ -102,25 +71,25 @@ void display_metadata(const struct ouichefs_sliced_block_meta *meta)
 	uint32_t next_block = meta->next_block;
 	uint32_t magic = meta->magic;
 	
-	printf("\n" COLOR_CYAN COLOR_BOLD "=== METADATA SLICE (Slice 0) ===" COLOR_RESET "\n");
+	printf("\n=== METADATA SLICE (Slice 0) ===\n");
 	printf("Magic Number:   0x%08X %s\n", magic, 
-	       (magic == OUICHEFS_SLICED_MAGIC) ? COLOR_GREEN "[VALID]" COLOR_RESET : COLOR_RED "[INVALID]" COLOR_RESET);
+	       (magic == OUICHEFS_SLICED_MAGIC) ? "[VALID]" : "[INVALID]");
 	printf("Slice Bitmap:   0x%08X (binary: ", bitmap);
 	
 	/* Display bitmap in binary with colors */
 	for (int i = 31; i >= 0; i--) {
 		if (i == 0) {
-			printf(COLOR_CYAN "%d" COLOR_RESET, (bitmap >> i) & 1);  /* Metadata bit */
+			printf("%d", (bitmap >> i) & 1);  /* Metadata bit */
 		} else if ((bitmap >> i) & 1) {
-			printf(COLOR_GREEN "%d" COLOR_RESET, 1);  /* Free slice */
+			printf("%d", 1);  /* Free slice */
 		} else {
-			printf(COLOR_RED "%d" COLOR_RESET, 0);    /* Occupied slice */
+			printf("%d", 0);    /* Occupied slice */
 		}
 	}
 	printf(")\n");
 	
 	printf("Next Block:     %u %s\n", next_block,
-	       (next_block == 0) ? COLOR_YELLOW "[NONE]" COLOR_RESET : "");
+	       (next_block == 0) ? "[NONE]" : "");
 	
 	/* Count and display free/occupied slices */
 	int free_count = 0, occupied_count = 0;
@@ -132,7 +101,7 @@ void display_metadata(const struct ouichefs_sliced_block_meta *meta)
 			occupied_count++;
 		}
 	}
-	printf("Free: " COLOR_GREEN "%d" COLOR_RESET ", Occupied: " COLOR_RED "%d" COLOR_RESET "\n", 
+	printf("Free: %d , Occupied: %d\n", 
 	       free_count, occupied_count);
 	
 	/* List occupied slices */
@@ -140,7 +109,7 @@ void display_metadata(const struct ouichefs_sliced_block_meta *meta)
 		printf("Occupied slices: ");
 		for (int i = 1; i < OUICHEFS_SLICES_PER_BLOCK; i++) {
 			if (!((bitmap >> i) & 1)) {
-				printf(COLOR_RED "%d " COLOR_RESET, i);
+				printf("%d\n", i);
 			}
 		}
 		printf("\n");
@@ -177,21 +146,6 @@ void display_block_summary(const struct ouichefs_block_display *display_data, in
 			empty_slices++;
 		}
 	}
-	
-	printf(COLOR_BOLD "=== BLOCK SUMMARY ===" COLOR_RESET "\n");
-	printf("Block Number:       %u\n", display_data->block_number);
-	printf("Total Slices:       %d\n", OUICHEFS_SLICES_PER_BLOCK);
-	printf("Metadata Slices:    1\n");
-	printf("Data Slices:        %d\n", OUICHEFS_SLICES_PER_BLOCK - 1);
-	printf("Slices with Data:   " COLOR_YELLOW "%d" COLOR_RESET "\n", slices_with_data);
-	printf("Empty Slices:       " COLOR_GREEN "%d" COLOR_RESET "\n", empty_slices);
-	printf("Total Data Bytes:   " COLOR_CYAN "%d" COLOR_RESET "\n", total_data_bytes);
-	printf("Block Utilization:  %.1f%%\n", 
-	       (float)total_data_bytes / (OUICHEFS_SLICE_SIZE * (OUICHEFS_SLICES_PER_BLOCK - 1)) * 100);
-	
-	if (file_slice > 0) {
-		printf("File's Slice:       " COLOR_GREEN COLOR_BOLD "%d" COLOR_RESET "\n", file_slice);
-	}
 	printf("\n");
 }
 
@@ -204,7 +158,7 @@ int main(int argc, char *argv[])
 	/* Check arguments */
 	if (argc != 2) {
 		fprintf(stderr, "Usage: %s <filename>\n", argv[0]);
-		fprintf(stderr, "       Display the block content for a small file in OuiChefs\n");
+		fprintf(stderr, "Display the block content for a small file in OuiChefs\n");
 		return 1;
 	}
 	
@@ -217,7 +171,7 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 	
-	printf(COLOR_BOLD "OuiChefs Block Content Display Tool" COLOR_RESET "\n");
+	printf("OuiChefs Block Content Display Tool\n");
 	printf("File: %s\n\n", filename);
 	
 	/* Call the ioctl */
@@ -267,16 +221,16 @@ int main(int argc, char *argv[])
 	display_block_summary(&display_data, file_slice);
 	
 	/* Display all slices */
-	printf(COLOR_BOLD "=== BLOCK CONTENT (32 slices x 128 bytes) ===" COLOR_RESET "\n");
-	printf("Legend: " COLOR_CYAN "Metadata" COLOR_RESET " | " 
-	       COLOR_GREEN "File's slice" COLOR_RESET " | " 
-	       COLOR_YELLOW "Other data" COLOR_RESET " | Empty\n\n");
+	printf("=== BLOCK CONTENT (32 slices x 128 bytes) ===\n");
+	printf("Legend: First row (slice) is Metadata | Then 31 data slices | "
+					"! is Unicode null symbol or an actual ! | "
+					"? is non-printable char or an actual ?\n\n");
 	
 	for (int i = 0; i < OUICHEFS_SLICES_PER_BLOCK; i++) {
 		display_slice(i, display_data.slices[i], file_slice);
 	}
 	
-	printf("\n" COLOR_BOLD "=== END OF BLOCK ===" COLOR_RESET "\n");
+	printf("\n=== END OF BLOCK ===\n");
 	
 	close(fd);
 	return 0;

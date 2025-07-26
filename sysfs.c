@@ -612,8 +612,11 @@ void ouichefs_sysfs_remove_partition(struct super_block *sb)
             mutex_unlock(&ouichefs_sysfs_mutex);
             
             sysfs_remove_group(entry->kobj, &ouichefs_attr_group);
-            kobject_put(entry->kobj);  // This will eventually call kfree(entry)
+            kobject_put(entry->kobj);
             pr_info("Removed sysfs interface for partition %s\n", entry->device_name);
+            
+            // FIX: Explicitly free the entry structure
+            kfree(entry);
             return;
         }
     }
@@ -638,7 +641,9 @@ void ouichefs_sysfs_exit(void)
         sysfs_remove_group(entry->kobj, &ouichefs_attr_group);
         kobject_put(entry->kobj);
         pr_info("Cleaned up sysfs interface for partition %s\n", entry->device_name);
-        //kfree(entry);
+        
+        // FIX: Explicitly free the entry structure
+        kfree(entry);
     }
     mutex_unlock(&ouichefs_sysfs_mutex);
 
