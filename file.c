@@ -22,19 +22,23 @@
 MODULE_LICENSE("GPL");
 
 /* Forward declarations */
-static ssize_t ouichefs_convert_to_traditional(struct inode *inode, const char *new_data, 
-						size_t new_data_len, loff_t *pos);
-static ssize_t ouichefs_write_small_file(struct inode *inode, const char *kbuf, 
-					  size_t bytes_to_write, loff_t *pos);
+static ssize_t ouichefs_convert_to_traditional(struct inode *inode,
+					       const char *new_data,
+					       size_t new_data_len,
+					       loff_t *pos);
+static ssize_t ouichefs_write_small_file(struct inode *inode, const char *kbuf,
+					 size_t bytes_to_write, loff_t *pos);
 static ssize_t ouichefs_write_large_file(struct inode *inode, const char *kbuf,
-					  size_t bytes_to_write, loff_t *pos);
-static ssize_t ouichefs_read_traditional_file(struct inode *inode, char *buffer, size_t size);
+					 size_t bytes_to_write, loff_t *pos);
+static ssize_t ouichefs_read_traditional_file(struct inode *inode, char *buffer,
+					      size_t size);
 static void ouichefs_free_traditional_blocks(struct inode *inode);
 
 /* Slice relocation function from sliced.c */
-extern uint32_t ouichefs_try_relocate_slices(struct super_block *sb, uint32_t old_block,
-					     uint32_t old_slice, uint32_t old_count,
-					     uint32_t new_count, uint32_t *new_slice);
+extern uint32_t
+ouichefs_try_relocate_slices(struct super_block *sb, uint32_t old_block,
+			     uint32_t old_slice, uint32_t old_count,
+			     uint32_t new_count, uint32_t *new_slice);
 
 /*
  * Map the buffer_head passed in argument with the iblock-th block of the file
@@ -80,7 +84,7 @@ static int ouichefs_file_get_block(struct inode *inode, sector_t iblock,
 	} else {
 		bno = le32_to_cpu(index->blocks[iblock]);
 	}
-	
+
 	map_bh(bh_result, sb, bno);
 
 brelse_index:
@@ -108,7 +112,7 @@ static int ouichefs_write_begin(struct file *file,
 	uint32_t nr_allocs = 0;
 
 	/* Small files use sliced blocks, handled separately */
-	if (ouichefs_is_small_file(file->f_inode->i_size) || 
+	if (ouichefs_is_small_file(file->f_inode->i_size) ||
 	    ouichefs_is_small_file(pos + len)) {
 		return -EINVAL;
 	}
@@ -154,7 +158,8 @@ static int ouichefs_write_end(struct file *file, struct address_space *mapping,
 		uint32_t nr_blocks_old = inode->i_blocks;
 
 		inode->i_blocks = (roundup(inode->i_size, OUICHEFS_BLOCK_SIZE) /
-				   OUICHEFS_BLOCK_SIZE) + 1;
+				   OUICHEFS_BLOCK_SIZE) +
+				  1;
 		inode->i_mtime = inode->i_ctime = current_time(inode);
 		mark_inode_dirty(inode);
 
@@ -175,8 +180,10 @@ static int ouichefs_write_end(struct file *file, struct address_space *mapping,
 			index = (struct ouichefs_file_index_block *)
 					bh_index->b_data;
 
-			for (i = inode->i_blocks - 1; i < nr_blocks_old - 1; i++) {
-				put_block(OUICHEFS_SB(sb), le32_to_cpu(index->blocks[i]));
+			for (i = inode->i_blocks - 1; i < nr_blocks_old - 1;
+			     i++) {
+				put_block(OUICHEFS_SB(sb),
+					  le32_to_cpu(index->blocks[i]));
 				index->blocks[i] = 0;
 			}
 			mark_buffer_dirty(bh_index);
@@ -200,19 +207,20 @@ const struct address_space_operations ouichefs_aops = {
 static bool ouichefs_uses_slice_storage(struct inode *inode)
 {
 	struct ouichefs_inode_info *ci = OUICHEFS_INODE(inode);
-	
+
 	if (inode->i_size == 0 || ci->index_block == 0) {
 		return false;
 	}
-	
+
 	if (inode->i_size > OUICHEFS_SMALL_FILE_THRESHOLD) {
 		return false;
 	}
-	
+
 	uint32_t block_num = ouichefs_get_slice_block(ci->index_block);
 	uint32_t slice_num = ouichefs_get_slice_number(ci->index_block);
-	
-	return (block_num != 0 && slice_num != 0 && slice_num < OUICHEFS_SLICES_PER_BLOCK);
+
+	return (block_num != 0 && slice_num != 0 &&
+		slice_num < OUICHEFS_SLICES_PER_BLOCK);
 }
 
 static int ouichefs_open(struct inode *inode, struct file *file)
@@ -221,28 +229,34 @@ static int ouichefs_open(struct inode *inode, struct file *file)
 	bool rdwr = (file->f_flags & O_RDWR) != 0;
 	bool trunc = (file->f_flags & O_TRUNC) != 0;
 	bool append = (file->f_flags & O_APPEND) != 0;
-	
-	pr_debug("File open: size=%lld, trunc=%d, append=%d\n", inode->i_size, trunc, append);
-	
+
+	pr_debug("File open: size=%lld, trunc=%d, append=%d\n", inode->i_size,
+		 trunc, append);
+
 	/* Handle truncation */
 	if ((wronly || rdwr) && trunc && (inode->i_size != 0)) {
 		struct super_block *sb = inode->i_sb;
 		struct ouichefs_sb_info *sbi = OUICHEFS_SB(sb);
 		struct ouichefs_inode_info *ci = OUICHEFS_INODE(inode);
-		
-		pr_debug("Truncating file: current_size=%lld, uses_slices=%d\n", 
+
+		pr_debug("Truncating file: current_size=%lld, uses_slices=%d\n",
 			 inode->i_size, ouichefs_uses_slice_storage(inode));
-		
+
 		if (ouichefs_uses_slice_storage(inode)) {
 			/* File uses slice storage - free the slices */
-			uint32_t block_num = ouichefs_get_slice_block(ci->index_block);
-			uint32_t slice_num = ouichefs_get_slice_number(ci->index_block);
-			uint32_t slices_used = ouichefs_slices_needed(inode->i_size);
-			
-			pr_debug("Freeing %u slices starting at slice %u in block %u\n", 
-				 slices_used, slice_num, block_num);
-			ouichefs_free_slices(sb, block_num, slice_num, slices_used);
-			
+			uint32_t block_num =
+				ouichefs_get_slice_block(ci->index_block);
+			uint32_t slice_num =
+				ouichefs_get_slice_number(ci->index_block);
+			uint32_t slices_used =
+				ouichefs_slices_needed(inode->i_size);
+
+			pr_debug(
+				"Freeing %u slices starting at slice %u in block %u\n",
+				slices_used, slice_num, block_num);
+			ouichefs_free_slices(sb, block_num, slice_num,
+					     slices_used);
+
 			/* Reset inode */
 			inode->i_size = 0;
 			inode->i_blocks = 0;
@@ -252,32 +266,37 @@ static int ouichefs_open(struct inode *inode, struct file *file)
 			struct ouichefs_file_index_block *index;
 			struct buffer_head *bh_index;
 			uint32_t blocks_to_free = inode->i_blocks - 1;
-			
-			pr_debug("Freeing traditional storage: index_block=%u, data_blocks=%u\n", 
-				 ci->index_block, blocks_to_free);
-			
+
+			pr_debug(
+				"Freeing traditional storage: index_block=%u, data_blocks=%u\n",
+				ci->index_block, blocks_to_free);
+
 			bh_index = sb_bread(sb, ci->index_block);
 			if (!bh_index) {
-				pr_err("Failed to read index block %u for truncation\n", ci->index_block);
+				pr_err("Failed to read index block %u for truncation\n",
+				       ci->index_block);
 				return -EIO;
 			}
-			
-			index = (struct ouichefs_file_index_block *)bh_index->b_data;
-			
+
+			index = (struct ouichefs_file_index_block *)
+					bh_index->b_data;
+
 			for (uint32_t i = 0; i < blocks_to_free; i++) {
-				uint32_t data_block = le32_to_cpu(index->blocks[i]);
+				uint32_t data_block =
+					le32_to_cpu(index->blocks[i]);
 				if (data_block != 0) {
 					put_block(sbi, data_block);
 					index->blocks[i] = 0;
-					pr_debug("Freed data block %u\n", data_block);
+					pr_debug("Freed data block %u\n",
+						 data_block);
 				}
 			}
-			
+
 			memset(index, 0, OUICHEFS_BLOCK_SIZE);
 			mark_buffer_dirty(bh_index);
 			sync_dirty_buffer(bh_index);
 			brelse(bh_index);
-			
+
 			inode->i_size = 0;
 			inode->i_blocks = 1;
 		} else {
@@ -285,46 +304,49 @@ static int ouichefs_open(struct inode *inode, struct file *file)
 			inode->i_blocks = 0;
 			ci->index_block = 0;
 		}
-		
+
 		mark_inode_dirty(inode);
-		pr_debug("Truncation completed: new_size=%lld, blocks=%llu\n", 
+		pr_debug("Truncation completed: new_size=%lld, blocks=%llu\n",
 			 inode->i_size, inode->i_blocks);
 	}
-	
+
 	if ((wronly || rdwr) && append && (inode->i_size != 0)) {
 		file->f_pos = inode->i_size;
 		pr_debug("Append mode: set position to %lld\n", file->f_pos);
 	}
-	
+
 	return 0;
 }
 
 /*
  * Enhanced read function supporting multi-slice files
  */
-static ssize_t ouichefs_read(struct file *file, char __user *buf, size_t len, loff_t *pos)
+static ssize_t ouichefs_read(struct file *file, char __user *buf, size_t len,
+			     loff_t *pos)
 {
 	struct inode *inode = file->f_inode;
 	struct super_block *sb = inode->i_sb;
 	struct ouichefs_inode_info *ci = OUICHEFS_INODE(inode);
 
 	if (*pos >= inode->i_size)
-		return 0;  // EOF
+		return 0; // EOF
 
 	/* Check if this is a small file using slice storage */
 	if (ouichefs_uses_slice_storage(inode)) {
 		uint32_t block_num = ouichefs_get_slice_block(ci->index_block);
-		uint32_t slice_start = ouichefs_get_slice_number(ci->index_block);
+		uint32_t slice_start =
+			ouichefs_get_slice_number(ci->index_block);
 		uint32_t slices_used = ouichefs_slices_needed(inode->i_size);
-		
+
 		char *kbuf = kmalloc(len, GFP_KERNEL);
 		if (!kbuf)
 			return -ENOMEM;
 
 		size_t bytes_to_read = min(len, (size_t)(inode->i_size - *pos));
-		ssize_t ret = ouichefs_read_slices(sb, block_num, slice_start, slices_used,
-						   kbuf, bytes_to_read);
-		
+		ssize_t ret = ouichefs_read_slices(sb, block_num, slice_start,
+						   slices_used, kbuf,
+						   bytes_to_read);
+
 		if (ret > 0) {
 			if (copy_to_user(buf, kbuf + *pos, ret)) {
 				kfree(kbuf);
@@ -332,9 +354,10 @@ static ssize_t ouichefs_read(struct file *file, char __user *buf, size_t len, lo
 			}
 			*pos += ret;
 		}
-		
+
 		kfree(kbuf);
-		pr_debug("Read %zd bytes from multi-slice file at pos %lld\n", ret, *pos - ret);
+		pr_debug("Read %zd bytes from multi-slice file at pos %lld\n",
+			 ret, *pos - ret);
 		return ret;
 	}
 
@@ -395,7 +418,7 @@ static ssize_t ouichefs_read(struct file *file, char __user *buf, size_t len, lo
 
 		if (*pos >= inode->i_size)
 			break;
-    }
+	}
 
 	if (copy_to_user(buf, kbuf, total_copied)) {
 		kfree(kbuf);
@@ -411,14 +434,16 @@ static ssize_t ouichefs_read(struct file *file, char __user *buf, size_t len, lo
 /*
  * Enhanced write function supporting multi-slice files
  */
-static ssize_t ouichefs_write(struct file *file, const char __user *buf, size_t len, loff_t *pos)
+static ssize_t ouichefs_write(struct file *file, const char __user *buf,
+			      size_t len, loff_t *pos)
 {
 	struct inode *inode = file->f_inode;
 	struct ouichefs_inode_info *ci = OUICHEFS_INODE(inode);
 	char *kbuf = NULL;
 	size_t bytes_to_write;
 	ssize_t ret;
-	bool will_exceed_threshold = (*pos + len > OUICHEFS_SMALL_FILE_THRESHOLD);
+	bool will_exceed_threshold =
+		(*pos + len > OUICHEFS_SMALL_FILE_THRESHOLD);
 	bool is_currently_small = ouichefs_is_small_file(inode->i_size);
 	bool is_currently_large = !is_currently_small && inode->i_size > 0;
 	bool uses_slices = false;
@@ -427,7 +452,7 @@ static ssize_t ouichefs_write(struct file *file, const char __user *buf, size_t 
 		return -ENOSPC;
 
 	bytes_to_write = min(len, (size_t)(OUICHEFS_MAX_FILESIZE - *pos));
-	
+
 	if (bytes_to_write == 0)
 		return 0;
 
@@ -435,7 +460,8 @@ static ssize_t ouichefs_write(struct file *file, const char __user *buf, size_t 
 	if (is_currently_small && ci->index_block != 0) {
 		uint32_t block_num = ouichefs_get_slice_block(ci->index_block);
 		uint32_t slice_num = ouichefs_get_slice_number(ci->index_block);
-		uses_slices = (block_num != 0 && slice_num != 0 && slice_num < OUICHEFS_SLICES_PER_BLOCK);
+		uses_slices = (block_num != 0 && slice_num != 0 &&
+			       slice_num < OUICHEFS_SLICES_PER_BLOCK);
 	}
 
 	/* Copy data from user space */
@@ -448,34 +474,45 @@ static ssize_t ouichefs_write(struct file *file, const char __user *buf, size_t 
 		goto cleanup;
 	}
 
-	pr_debug("WRITE: len=%zu, pos=%lld, will_exceed_threshold=%d, current_size=%lld, uses_slices=%d\n", 
-		 bytes_to_write, *pos, will_exceed_threshold, inode->i_size, uses_slices);
+	pr_debug(
+		"WRITE: len=%zu, pos=%lld, will_exceed_threshold=%d, current_size=%lld, uses_slices=%d\n",
+		bytes_to_write, *pos, will_exceed_threshold, inode->i_size,
+		uses_slices);
 
 	/* Decision logic for write handling */
 	if (is_currently_large) {
 		/* File is already large - use traditional storage operations */
 		pr_debug("Writing to existing large file\n");
-		ret = ouichefs_write_large_file(inode, kbuf, bytes_to_write, pos);
+		ret = ouichefs_write_large_file(inode, kbuf, bytes_to_write,
+						pos);
 	} else if (will_exceed_threshold && uses_slices) {
 		/* Small file with slices needs conversion to traditional storage */
 		pr_info("Converting slice-based file to traditional storage\n");
-		ret = ouichefs_convert_to_traditional(inode, kbuf, bytes_to_write, pos);
-	} else if (will_exceed_threshold && !uses_slices && ci->index_block == 0) {
+		ret = ouichefs_convert_to_traditional(inode, kbuf,
+						      bytes_to_write, pos);
+	} else if (will_exceed_threshold && !uses_slices &&
+		   ci->index_block == 0) {
 		/* Empty file that will be large - allocate traditional storage directly */
 		pr_info("Creating new large file with traditional storage\n");
-		ret = ouichefs_convert_to_traditional(inode, kbuf, bytes_to_write, pos);
-	} else if (will_exceed_threshold && !uses_slices && ci->index_block != 0) {
+		ret = ouichefs_convert_to_traditional(inode, kbuf,
+						      bytes_to_write, pos);
+	} else if (will_exceed_threshold && !uses_slices &&
+		   ci->index_block != 0) {
 		/* File already uses traditional storage - just expand it */
 		pr_debug("Expanding existing traditional storage file\n");
-		ret = ouichefs_write_large_file(inode, kbuf, bytes_to_write, pos);
+		ret = ouichefs_write_large_file(inode, kbuf, bytes_to_write,
+						pos);
 	} else if (!uses_slices && ci->index_block != 0) {
 		/* File currently uses traditional storage - keep using it (small content) */
-		pr_debug("Writing small content to existing traditional storage file\n");
-		ret = ouichefs_write_large_file(inode, kbuf, bytes_to_write, pos);
+		pr_debug(
+			"Writing small content to existing traditional storage file\n");
+		ret = ouichefs_write_large_file(inode, kbuf, bytes_to_write,
+						pos);
 	} else {
 		/* File will use slice storage (new small file or existing slice file) */
 		pr_debug("Writing to small file using multi-slice storage\n");
-		ret = ouichefs_write_small_file(inode, kbuf, bytes_to_write, pos);
+		ret = ouichefs_write_small_file(inode, kbuf, bytes_to_write,
+						pos);
 	}
 
 cleanup:
@@ -486,21 +523,23 @@ cleanup:
 /*
  * Enhanced write to small files using multi-slice storage
  */
-static ssize_t ouichefs_write_small_file(struct inode *inode, const char *kbuf, 
+static ssize_t ouichefs_write_small_file(struct inode *inode, const char *kbuf,
 					 size_t bytes_to_write, loff_t *pos)
 {
 	struct super_block *sb = inode->i_sb;
 	struct ouichefs_inode_info *ci = OUICHEFS_INODE(inode);
 	uint32_t block_num, slice_start;
 	uint32_t current_slices_used = 0;
-	uint32_t new_size = max((size_t)inode->i_size, (size_t)(*pos + bytes_to_write));
+	uint32_t new_size =
+		max((size_t)inode->i_size, (size_t)(*pos + bytes_to_write));
 	uint32_t required_slices = ouichefs_slices_needed(new_size);
 	bool need_new_allocation = false;
 	bool need_expansion = false;
 	ssize_t ret;
 
-	pr_debug("Writing %zu bytes to small file, current_size=%lld, new_size=%u, required_slices=%u\n",
-		 bytes_to_write, inode->i_size, new_size, required_slices);
+	pr_debug(
+		"Writing %zu bytes to small file, current_size=%lld, new_size=%u, required_slices=%u\n",
+		bytes_to_write, inode->i_size, new_size, required_slices);
 
 	/* Determine current allocation status */
 	if (inode->i_size == 0 || ci->index_block == 0) {
@@ -509,9 +548,11 @@ static ssize_t ouichefs_write_small_file(struct inode *inode, const char *kbuf,
 		block_num = ouichefs_get_slice_block(ci->index_block);
 		slice_start = ouichefs_get_slice_number(ci->index_block);
 		current_slices_used = ouichefs_slices_needed(inode->i_size);
-		
-		if (block_num == 0 || slice_start == 0 || slice_start >= OUICHEFS_SLICES_PER_BLOCK) {
-			pr_err("Invalid slice information: block=%u, slice=%u\n", block_num, slice_start);
+
+		if (block_num == 0 || slice_start == 0 ||
+		    slice_start >= OUICHEFS_SLICES_PER_BLOCK) {
+			pr_err("Invalid slice information: block=%u, slice=%u\n",
+			       block_num, slice_start);
 			need_new_allocation = true;
 		} else if (required_slices > current_slices_used) {
 			need_expansion = true;
@@ -521,14 +562,17 @@ static ssize_t ouichefs_write_small_file(struct inode *inode, const char *kbuf,
 	/* Handle allocation/expansion */
 	if (need_new_allocation) {
 		/* Allocate new contiguous slices */
-		block_num = ouichefs_alloc_slices(sb, &slice_start, required_slices);
+		block_num = ouichefs_alloc_slices(sb, &slice_start,
+						  required_slices);
 		if (!block_num) {
-			pr_err("Failed to allocate %u slices for small file\n", required_slices);
+			pr_err("Failed to allocate %u slices for small file\n",
+			       required_slices);
 			return -ENOSPC;
 		}
-		
-		ci->index_block = ouichefs_make_slice_index(block_num, slice_start);
-		pr_debug("Allocated %u new slices: block=%u, slice=%u\n", 
+
+		ci->index_block =
+			ouichefs_make_slice_index(block_num, slice_start);
+		pr_debug("Allocated %u new slices: block=%u, slice=%u\n",
 			 required_slices, block_num, slice_start);
 	} else if (need_expansion) {
 		/* Try to expand in place or relocate */
@@ -536,64 +580,70 @@ static ssize_t ouichefs_write_small_file(struct inode *inode, const char *kbuf,
 		struct ouichefs_sliced_block_meta *meta;
 		uint32_t bitmap;
 		bool can_expand_in_place = true;
-		
+
 		/* Check if we can expand in place */
 		bh = sb_bread(sb, block_num);
 		if (!bh) {
-			pr_err("Failed to read block %u for expansion check\n", block_num);
+			pr_err("Failed to read block %u for expansion check\n",
+			       block_num);
 			return -EIO;
 		}
-		
+
 		meta = (struct ouichefs_sliced_block_meta *)bh->b_data;
 		bitmap = le32_to_cpu(meta->slice_bitmap);
-		
+
 		/* Check if subsequent slices are free */
-		for (uint32_t i = current_slices_used; i < required_slices; i++) {
-			if (slice_start + i >= OUICHEFS_SLICES_PER_BLOCK || 
+		for (uint32_t i = current_slices_used; i < required_slices;
+		     i++) {
+			if (slice_start + i >= OUICHEFS_SLICES_PER_BLOCK ||
 			    !(bitmap & (1U << (slice_start + i)))) {
 				can_expand_in_place = false;
 				break;
 			}
 		}
-		
+
 		if (can_expand_in_place) {
 			/* Allocate additional slices in place */
-			for (uint32_t i = current_slices_used; i < required_slices; i++) {
+			for (uint32_t i = current_slices_used;
+			     i < required_slices; i++) {
 				bitmap &= ~(1U << (slice_start + i));
 			}
 			meta->slice_bitmap = cpu_to_le32(bitmap);
 			mark_buffer_dirty(bh);
 			sync_dirty_buffer(bh);
-			
-			pr_debug("Expanded in place from %u to %u slices\n", 
+
+			pr_debug("Expanded in place from %u to %u slices\n",
 				 current_slices_used, required_slices);
 		} else {
 			/* Need to relocate to get contiguous space */
 			brelse(bh);
-			
+
 			/* Use the relocate function to handle the move efficiently */
-			uint32_t new_block = ouichefs_try_relocate_slices(sb, block_num, slice_start,
-									  current_slices_used, required_slices,
-									  &slice_start);
+			uint32_t new_block = ouichefs_try_relocate_slices(
+				sb, block_num, slice_start, current_slices_used,
+				required_slices, &slice_start);
 			if (!new_block) {
 				pr_err("Failed to relocate slices for expansion from %u to %u slices\n",
 				       current_slices_used, required_slices);
 				return -ENOSPC;
 			}
-			
+
 			/* Update inode to point to new location */
 			block_num = new_block;
-			ci->index_block = ouichefs_make_slice_index(block_num, slice_start);
-			
+			ci->index_block = ouichefs_make_slice_index(
+				block_num, slice_start);
+
 			pr_info("Successfully relocated file from %u to %u slices (block %u, slice %u)\n",
-				current_slices_used, required_slices, block_num, slice_start);
+				current_slices_used, required_slices, block_num,
+				slice_start);
 		}
-		
+
 		brelse(bh);
 	}
 
 	/* Now perform the actual write operation */
-	char *write_buffer = kmalloc(required_slices * OUICHEFS_SLICE_SIZE, GFP_KERNEL);
+	char *write_buffer =
+		kmalloc(required_slices * OUICHEFS_SLICE_SIZE, GFP_KERNEL);
 	if (!write_buffer) {
 		pr_err("Failed to allocate write buffer\n");
 		return -ENOMEM;
@@ -605,10 +655,12 @@ static ssize_t ouichefs_write_small_file(struct inode *inode, const char *kbuf,
 	/* Read existing data if doing partial overwrite */
 	if (*pos > 0 || (*pos + bytes_to_write < new_size)) {
 		if (inode->i_size > 0) {
-			ssize_t read_ret = ouichefs_read_slices(sb, block_num, slice_start, 
-								required_slices, write_buffer, inode->i_size);
+			ssize_t read_ret = ouichefs_read_slices(
+				sb, block_num, slice_start, required_slices,
+				write_buffer, inode->i_size);
 			if (read_ret < 0) {
-				pr_err("Failed to read existing data for partial write: %zd\n", read_ret);
+				pr_err("Failed to read existing data for partial write: %zd\n",
+				       read_ret);
 				kfree(write_buffer);
 				return read_ret;
 			}
@@ -640,12 +692,14 @@ static ssize_t ouichefs_write_small_file(struct inode *inode, const char *kbuf,
 	if (*pos > inode->i_size) {
 		inode->i_size = *pos;
 	}
-	inode->i_blocks = 0; /* Small files don't count blocks in traditional sense */
+	inode->i_blocks =
+		0; /* Small files don't count blocks in traditional sense */
 	inode->i_mtime = inode->i_ctime = current_time(inode);
 	mark_inode_dirty(inode);
 
-	pr_debug("Multi-slice write completed: wrote %zu bytes, new file size=%lld, using %u slices\n", 
-		 bytes_to_write, (long long)inode->i_size, required_slices);
+	pr_debug(
+		"Multi-slice write completed: wrote %zu bytes, new file size=%lld, using %u slices\n",
+		bytes_to_write, (long long)inode->i_size, required_slices);
 
 	return bytes_to_write;
 }
@@ -654,7 +708,8 @@ static ssize_t ouichefs_write_small_file(struct inode *inode, const char *kbuf,
  * Convert a small file from slice storage to traditional storage
  * Enhanced to handle multi-slice files
  */
-static ssize_t ouichefs_convert_to_traditional(struct inode *inode, const char *new_data, 
+static ssize_t ouichefs_convert_to_traditional(struct inode *inode,
+					       const char *new_data,
 					       size_t new_data_len, loff_t *pos)
 {
 	struct super_block *sb = inode->i_sb;
@@ -670,20 +725,24 @@ static ssize_t ouichefs_convert_to_traditional(struct inode *inode, const char *
 	bool currently_uses_slices = false;
 	ssize_t ret;
 
-	pr_info("Converting multi-slice file to traditional storage: old_size=%zu, new_size=%zu\n", 
+	pr_info("Converting multi-slice file to traditional storage: old_size=%zu, new_size=%zu\n",
 		old_data_size, final_size);
 
 	/* Check if the file currently uses slice storage */
-	if (old_data_size <= OUICHEFS_SMALL_FILE_THRESHOLD && ci->index_block != 0) {
+	if (old_data_size <= OUICHEFS_SMALL_FILE_THRESHOLD &&
+	    ci->index_block != 0) {
 		old_block_num = ouichefs_get_slice_block(ci->index_block);
 		old_slice_start = ouichefs_get_slice_number(ci->index_block);
 		old_slices_used = ouichefs_slices_needed(old_data_size);
-		currently_uses_slices = (old_block_num != 0 && old_slice_start != 0 && 
-					 old_slice_start < OUICHEFS_SLICES_PER_BLOCK);
+		currently_uses_slices =
+			(old_block_num != 0 && old_slice_start != 0 &&
+			 old_slice_start < OUICHEFS_SLICES_PER_BLOCK);
 	}
 
-	pr_debug("File currently uses slices: %s (block=%u, slice=%u, count=%u)\n", 
-		 currently_uses_slices ? "yes" : "no", old_block_num, old_slice_start, old_slices_used);
+	pr_debug(
+		"File currently uses slices: %s (block=%u, slice=%u, count=%u)\n",
+		currently_uses_slices ? "yes" : "no", old_block_num,
+		old_slice_start, old_slices_used);
 
 	/* Allocate buffer for combined data */
 	combined_data = kzalloc(final_size, GFP_KERNEL);
@@ -694,39 +753,50 @@ static ssize_t ouichefs_convert_to_traditional(struct inode *inode, const char *
 	if (old_data_size > 0) {
 		if (currently_uses_slices) {
 			/* Read from multiple slices */
-			ret = ouichefs_read_slices(sb, old_block_num, old_slice_start, old_slices_used,
-						   combined_data, old_data_size);
+			ret = ouichefs_read_slices(
+				sb, old_block_num, old_slice_start,
+				old_slices_used, combined_data, old_data_size);
 			if (ret < 0) {
-				pr_err("Failed to read old slice data: %zd\n", ret);
+				pr_err("Failed to read old slice data: %zd\n",
+				       ret);
 				kfree(combined_data);
 				return ret;
 			}
-			pr_debug("Read %zd bytes from %u slices\n", old_data_size, old_slices_used);
+			pr_debug("Read %zd bytes from %u slices\n",
+				 old_data_size, old_slices_used);
 		} else if (ci->index_block != 0) {
 			/* Read from traditional storage */
-			ret = ouichefs_read_traditional_file(inode, combined_data, old_data_size);
+			ret = ouichefs_read_traditional_file(
+				inode, combined_data, old_data_size);
 			if (ret < 0) {
-				pr_err("Failed to read old traditional data: %zd\n", ret);
+				pr_err("Failed to read old traditional data: %zd\n",
+				       ret);
 				kfree(combined_data);
 				return ret;
 			}
-			pr_debug("Read %zd bytes from traditional storage\n", old_data_size);
+			pr_debug("Read %zd bytes from traditional storage\n",
+				 old_data_size);
 		}
 	}
 
 	/* Merge new data into combined buffer */
 	if (*pos < final_size && new_data_len > 0) {
-		size_t copy_len = min(new_data_len, (size_t)(final_size - *pos));
+		size_t copy_len =
+			min(new_data_len, (size_t)(final_size - *pos));
 		memcpy(combined_data + *pos, new_data, copy_len);
-		pr_debug("Merged %zu bytes of new data at position %lld\n", copy_len, *pos);
+		pr_debug("Merged %zu bytes of new data at position %lld\n",
+			 copy_len, *pos);
 	}
 
 	/* Free old storage if it uses slices */
 	if (currently_uses_slices) {
-		ouichefs_free_slices(sb, old_block_num, old_slice_start, old_slices_used);
-		pr_debug("Freed %u old slices starting at slice %u in block %u\n", 
-			 old_slices_used, old_slice_start, old_block_num);
-	} else if (old_data_size > OUICHEFS_SMALL_FILE_THRESHOLD && ci->index_block != 0) {
+		ouichefs_free_slices(sb, old_block_num, old_slice_start,
+				     old_slices_used);
+		pr_debug(
+			"Freed %u old slices starting at slice %u in block %u\n",
+			old_slices_used, old_slice_start, old_block_num);
+	} else if (old_data_size > OUICHEFS_SMALL_FILE_THRESHOLD &&
+		   ci->index_block != 0) {
 		/* File was already traditional - we need to free old blocks */
 		ouichefs_free_traditional_blocks(inode);
 		pr_debug("Freed old traditional blocks\n");
@@ -747,15 +817,18 @@ static ssize_t ouichefs_convert_to_traditional(struct inode *inode, const char *
 		kfree(combined_data);
 		return -EIO;
 	}
-	
+
 	index = (struct ouichefs_file_index_block *)bh_index->b_data;
 	memset(index, 0, OUICHEFS_BLOCK_SIZE);
 
 	/* Calculate how many data blocks we need */
-	uint32_t blocks_needed = (final_size + OUICHEFS_BLOCK_SIZE - 1) / OUICHEFS_BLOCK_SIZE;
-	if (blocks_needed == 0) blocks_needed = 1;
+	uint32_t blocks_needed =
+		(final_size + OUICHEFS_BLOCK_SIZE - 1) / OUICHEFS_BLOCK_SIZE;
+	if (blocks_needed == 0)
+		blocks_needed = 1;
 
-	pr_debug("Need %u data blocks for %zu bytes\n", blocks_needed, final_size);
+	pr_debug("Need %u data blocks for %zu bytes\n", blocks_needed,
+		 final_size);
 
 	/* Allocate and write data blocks */
 	size_t bytes_written = 0;
@@ -766,7 +839,9 @@ static ssize_t ouichefs_convert_to_traditional(struct inode *inode, const char *
 			/* Clean up already allocated blocks */
 			for (uint32_t j = 0; j < i; j++) {
 				if (index->blocks[j] != 0) {
-					put_block(sbi, le32_to_cpu(index->blocks[j]));
+					put_block(
+						sbi,
+						le32_to_cpu(index->blocks[j]));
 				}
 			}
 			brelse(bh_index);
@@ -780,16 +855,19 @@ static ssize_t ouichefs_convert_to_traditional(struct inode *inode, const char *
 		/* Write data to this block */
 		bh_data = sb_bread(sb, first_data_block);
 		if (!bh_data) {
-			pr_err("Failed to read data block %u\n", first_data_block);
+			pr_err("Failed to read data block %u\n",
+			       first_data_block);
 			put_block(sbi, first_data_block);
 			continue;
 		}
 
 		memset(bh_data->b_data, 0, OUICHEFS_BLOCK_SIZE);
-		
-		size_t bytes_to_copy = min((size_t)OUICHEFS_BLOCK_SIZE, final_size - bytes_written);
+
+		size_t bytes_to_copy = min((size_t)OUICHEFS_BLOCK_SIZE,
+					   final_size - bytes_written);
 		if (bytes_to_copy > 0) {
-			memcpy(bh_data->b_data, combined_data + bytes_written, bytes_to_copy);
+			memcpy(bh_data->b_data, combined_data + bytes_written,
+			       bytes_to_copy);
 			bytes_written += bytes_to_copy;
 		}
 
@@ -797,7 +875,8 @@ static ssize_t ouichefs_convert_to_traditional(struct inode *inode, const char *
 		sync_dirty_buffer(bh_data);
 		brelse(bh_data);
 
-		pr_debug("Wrote %zu bytes to data block %u\n", bytes_to_copy, first_data_block);
+		pr_debug("Wrote %zu bytes to data block %u\n", bytes_to_copy,
+			 first_data_block);
 	}
 
 	/* Save the index block */
@@ -809,13 +888,14 @@ static ssize_t ouichefs_convert_to_traditional(struct inode *inode, const char *
 	ci->index_block = new_index_block;
 	inode->i_size = final_size;
 	inode->i_blocks = blocks_needed + 1; /* +1 for index block */
-	*pos += (new_data_len <= final_size - *pos) ? new_data_len : (final_size - *pos);
+	*pos += (new_data_len <= final_size - *pos) ? new_data_len :
+						      (final_size - *pos);
 	inode->i_mtime = inode->i_ctime = current_time(inode);
 	mark_inode_dirty(inode);
 
 	kfree(combined_data);
 
-	pr_info("Conversion completed: multi-slice file now uses traditional storage, size=%zu, blocks=%llu\n", 
+	pr_info("Conversion completed: multi-slice file now uses traditional storage, size=%zu, blocks=%llu\n",
 		final_size, inode->i_blocks);
 
 	return new_data_len;
@@ -824,7 +904,7 @@ static ssize_t ouichefs_convert_to_traditional(struct inode *inode, const char *
 /*
  * Write to large files using traditional storage
  */
-static ssize_t ouichefs_write_large_file(struct inode *inode, const char *kbuf, 
+static ssize_t ouichefs_write_large_file(struct inode *inode, const char *kbuf,
 					 size_t bytes_to_write, loff_t *pos)
 {
 	struct super_block *sb = inode->i_sb;
@@ -836,10 +916,12 @@ static ssize_t ouichefs_write_large_file(struct inode *inode, const char *kbuf,
 	size_t new_file_size;
 	uint32_t blocks_needed, blocks_allocated;
 
-	pr_debug("Writing %zu bytes to large file at position %lld\n", bytes_to_write, *pos);
+	pr_debug("Writing %zu bytes to large file at position %lld\n",
+		 bytes_to_write, *pos);
 
 	/* Calculate new file size */
-	new_file_size = max((size_t)inode->i_size, (size_t)(*pos + bytes_to_write));
+	new_file_size =
+		max((size_t)inode->i_size, (size_t)(*pos + bytes_to_write));
 
 	/* Read the index block */
 	bh_index = sb_bread(sb, ci->index_block);
@@ -850,17 +932,19 @@ static ssize_t ouichefs_write_large_file(struct inode *inode, const char *kbuf,
 	index = (struct ouichefs_file_index_block *)bh_index->b_data;
 
 	/* Calculate how many blocks we need for the new file size */
-	blocks_needed = (new_file_size + OUICHEFS_BLOCK_SIZE - 1) / OUICHEFS_BLOCK_SIZE;
+	blocks_needed =
+		(new_file_size + OUICHEFS_BLOCK_SIZE - 1) / OUICHEFS_BLOCK_SIZE;
 	blocks_allocated = inode->i_blocks - 1; /* Subtract index block */
 
-	pr_debug("Current blocks: %u, needed blocks: %u\n", blocks_allocated, blocks_needed);
+	pr_debug("Current blocks: %u, needed blocks: %u\n", blocks_allocated,
+		 blocks_needed);
 
 	/* Allocate additional blocks if needed */
 	if (blocks_needed > blocks_allocated) {
 		uint32_t blocks_to_allocate = blocks_needed - blocks_allocated;
-		
+
 		if (blocks_to_allocate > sbi->nr_free_blocks) {
-			pr_err("Not enough free blocks (need %u, have %u)\n", 
+			pr_err("Not enough free blocks (need %u, have %u)\n",
 			       blocks_to_allocate, sbi->nr_free_blocks);
 			brelse(bh_index);
 			return -ENOSPC;
@@ -874,9 +958,9 @@ static ssize_t ouichefs_write_large_file(struct inode *inode, const char *kbuf,
 				brelse(bh_index);
 				return -ENOSPC;
 			}
-			
+
 			index->blocks[i] = cpu_to_le32(new_block);
-			
+
 			/* Initialize the new block with zeros */
 			bh_data = sb_bread(sb, new_block);
 			if (bh_data) {
@@ -885,10 +969,11 @@ static ssize_t ouichefs_write_large_file(struct inode *inode, const char *kbuf,
 				sync_dirty_buffer(bh_data);
 				brelse(bh_data);
 			}
-			
-			pr_debug("Allocated new data block %u at index %u\n", new_block, i);
+
+			pr_debug("Allocated new data block %u at index %u\n",
+				 new_block, i);
 		}
-		
+
 		/* Update the index block */
 		mark_buffer_dirty(bh_index);
 		sync_dirty_buffer(bh_index);
@@ -896,39 +981,44 @@ static ssize_t ouichefs_write_large_file(struct inode *inode, const char *kbuf,
 
 	/* Write the data block by block */
 	while (bytes_written < bytes_to_write) {
-		uint32_t block_index = (*pos + bytes_written) / OUICHEFS_BLOCK_SIZE;
-		uint32_t block_offset = (*pos + bytes_written) % OUICHEFS_BLOCK_SIZE;
-		uint32_t bytes_in_block = min((size_t)(OUICHEFS_BLOCK_SIZE - block_offset), 
-					      bytes_to_write - bytes_written);
-		
+		uint32_t block_index =
+			(*pos + bytes_written) / OUICHEFS_BLOCK_SIZE;
+		uint32_t block_offset =
+			(*pos + bytes_written) % OUICHEFS_BLOCK_SIZE;
+		uint32_t bytes_in_block =
+			min((size_t)(OUICHEFS_BLOCK_SIZE - block_offset),
+			    bytes_to_write - bytes_written);
+
 		if (block_index >= blocks_needed) {
-			pr_err("Block index %u exceeds allocated blocks %u\n", block_index, blocks_needed);
+			pr_err("Block index %u exceeds allocated blocks %u\n",
+			       block_index, blocks_needed);
 			break;
 		}
-		
+
 		uint32_t data_block = le32_to_cpu(index->blocks[block_index]);
 		if (data_block == 0) {
 			pr_err("Data block %u not allocated\n", block_index);
 			break;
 		}
-		
+
 		/* Read the data block */
 		bh_data = sb_bread(sb, data_block);
 		if (!bh_data) {
 			pr_err("Failed to read data block %u\n", data_block);
 			break;
 		}
-		
+
 		/* Write data to the block */
-		memcpy(bh_data->b_data + block_offset, kbuf + bytes_written, bytes_in_block);
-		
+		memcpy(bh_data->b_data + block_offset, kbuf + bytes_written,
+		       bytes_in_block);
+
 		mark_buffer_dirty(bh_data);
 		sync_dirty_buffer(bh_data);
 		brelse(bh_data);
-		
+
 		bytes_written += bytes_in_block;
-		
-		pr_debug("Wrote %u bytes to block %u at offset %u\n", 
+
+		pr_debug("Wrote %u bytes to block %u at offset %u\n",
 			 bytes_in_block, data_block, block_offset);
 	}
 
@@ -943,18 +1033,21 @@ static ssize_t ouichefs_write_large_file(struct inode *inode, const char *kbuf,
 		inode->i_blocks = blocks_needed + 1; /* +1 for index block */
 		inode->i_mtime = inode->i_ctime = current_time(inode);
 		mark_inode_dirty(inode);
-		
-		pr_debug("Large file write completed: %zu bytes, new size=%lld, blocks=%llu\n", 
-			 bytes_written, (long long)inode->i_size, inode->i_blocks);
+
+		pr_debug(
+			"Large file write completed: %zu bytes, new size=%lld, blocks=%llu\n",
+			bytes_written, (long long)inode->i_size,
+			inode->i_blocks);
 	}
 
 	return bytes_written;
 }
-	
+
 /*
  * Read data from a traditional file (using index blocks)
  */
-static ssize_t ouichefs_read_traditional_file(struct inode *inode, char *buffer, size_t size)
+static ssize_t ouichefs_read_traditional_file(struct inode *inode, char *buffer,
+					      size_t size)
 {
 	struct super_block *sb = inode->i_sb;
 	struct ouichefs_inode_info *ci = OUICHEFS_INODE(inode);
@@ -979,25 +1072,29 @@ static ssize_t ouichefs_read_traditional_file(struct inode *inode, char *buffer,
 	while (bytes_read < bytes_to_read) {
 		uint32_t block_index = bytes_read / OUICHEFS_BLOCK_SIZE;
 		uint32_t block_offset = bytes_read % OUICHEFS_BLOCK_SIZE;
-		uint32_t bytes_in_block = min((size_t)(OUICHEFS_BLOCK_SIZE - block_offset), 
-					      bytes_to_read - bytes_read);
-		
+		uint32_t bytes_in_block =
+			min((size_t)(OUICHEFS_BLOCK_SIZE - block_offset),
+			    bytes_to_read - bytes_read);
+
 		uint32_t data_block = le32_to_cpu(index->blocks[block_index]);
 		if (data_block == 0) {
-			pr_debug("Unallocated block at index %u, stopping read\n", block_index);
+			pr_debug(
+				"Unallocated block at index %u, stopping read\n",
+				block_index);
 			break;
 		}
-		
+
 		/* Read the data block */
 		bh_data = sb_bread(sb, data_block);
 		if (!bh_data) {
 			pr_err("Failed to read data block %u\n", data_block);
 			break;
 		}
-		
+
 		/* Copy data from the block */
-		memcpy(buffer + bytes_read, bh_data->b_data + block_offset, bytes_in_block);
-		
+		memcpy(buffer + bytes_read, bh_data->b_data + block_offset,
+		       bytes_in_block);
+
 		brelse(bh_data);
 		bytes_read += bytes_in_block;
 	}
@@ -1016,7 +1113,8 @@ static void ouichefs_free_traditional_blocks(struct inode *inode)
 	struct ouichefs_inode_info *ci = OUICHEFS_INODE(inode);
 	struct ouichefs_file_index_block *index;
 	struct buffer_head *bh_index;
-	uint32_t blocks_to_free = inode->i_blocks - 1; /* Subtract index block */
+	uint32_t blocks_to_free =
+		inode->i_blocks - 1; /* Subtract index block */
 
 	if (ci->index_block == 0) {
 		return;
@@ -1025,7 +1123,8 @@ static void ouichefs_free_traditional_blocks(struct inode *inode)
 	/* Read the index block */
 	bh_index = sb_bread(sb, ci->index_block);
 	if (!bh_index) {
-		pr_err("Failed to read index block %u for cleanup\n", ci->index_block);
+		pr_err("Failed to read index block %u for cleanup\n",
+		       ci->index_block);
 		return;
 	}
 	index = (struct ouichefs_file_index_block *)bh_index->b_data;
@@ -1035,12 +1134,13 @@ static void ouichefs_free_traditional_blocks(struct inode *inode)
 		uint32_t data_block = le32_to_cpu(index->blocks[i]);
 		if (data_block != 0) {
 			put_block(sbi, data_block);
-			pr_debug("Freed traditional data block %u\n", data_block);
+			pr_debug("Freed traditional data block %u\n",
+				 data_block);
 		}
 	}
 
 	brelse(bh_index);
-	
+
 	/* Free the index block */
 	put_block(sbi, ci->index_block);
 	pr_debug("Freed traditional index block %u\n", ci->index_block);
@@ -1049,7 +1149,7 @@ static void ouichefs_free_traditional_blocks(struct inode *inode)
 /* IOCTL implementation */
 #include "ouichefs_ioctl.h"
 
-/**
+/*
  * IOCTL handler for displaying block content
  */
 static long ouichefs_display_block_ioctl(struct file *file, unsigned long arg)
@@ -1073,14 +1173,14 @@ static long ouichefs_display_block_ioctl(struct file *file, unsigned long arg)
 
 	/* Check if file is small enough to use sliced storage */
 	if (inode->i_size > OUICHEFS_SMALL_FILE_THRESHOLD) {
-		pr_err("IOCTL: File size (%lld) exceeds slice storage limit (%u bytes)\n", 
+		pr_err("IOCTL: File size (%lld) exceeds slice storage limit (%u bytes)\n",
 		       inode->i_size, OUICHEFS_SMALL_FILE_THRESHOLD);
 		return -EINVAL;
 	}
 
-	/* Check if file has slice allocation */
+	/* Check if file is not empty */
 	if (ci->index_block == 0) {
-		pr_err("IOCTL: File has no slice allocated\n");
+		pr_err("IOCTL: File has no storage allocated\n");
 		return -ENODATA;
 	}
 
@@ -1089,13 +1189,16 @@ static long ouichefs_display_block_ioctl(struct file *file, unsigned long arg)
 	slice_num = ouichefs_get_slice_number(ci->index_block);
 
 	/* Validate slice information */
-	if (block_num == 0 || slice_num == 0 || slice_num >= OUICHEFS_SLICES_PER_BLOCK) {
-		pr_err("IOCTL: Invalid slice info - block:%u slice:%u\n", block_num, slice_num);
+	if (block_num == 0 || slice_num == 0 ||
+	    slice_num >= OUICHEFS_SLICES_PER_BLOCK) {
+		pr_err("IOCTL: Invalid slice info - block:%u slice:%u\n",
+		       block_num, slice_num);
 		return -EINVAL;
 	}
 
 	/* Allocate memory for display data */
-	display_data = kmalloc(sizeof(struct ouichefs_block_display), GFP_KERNEL);
+	display_data =
+		kmalloc(sizeof(struct ouichefs_block_display), GFP_KERNEL);
 	if (!display_data) {
 		return -ENOMEM;
 	}
@@ -1113,8 +1216,8 @@ static long ouichefs_display_block_ioctl(struct file *file, unsigned long arg)
 
 	/* Copy all slices from the block */
 	for (i = 0; i < OUICHEFS_SLICES_PER_BLOCK; i++) {
-		memcpy(display_data->slices[i], 
-		       block_data + (i * OUICHEFS_SLICE_SIZE), 
+		memcpy(display_data->slices[i],
+		       block_data + (i * OUICHEFS_SLICE_SIZE),
 		       OUICHEFS_SLICE_SIZE);
 	}
 
@@ -1122,17 +1225,18 @@ static long ouichefs_display_block_ioctl(struct file *file, unsigned long arg)
 
 	/* Copy data to user space */
 	user_data = (struct ouichefs_block_display __user *)arg;
-	if (copy_to_user(user_data, display_data, sizeof(struct ouichefs_block_display))) {
+	if (copy_to_user(user_data, display_data,
+			 sizeof(struct ouichefs_block_display))) {
 		ret = -EFAULT;
 		goto free_display_data;
 	}
 
 	/* Print debug information to kernel log */
 	uint32_t slices_used = ouichefs_slices_needed(inode->i_size);
-	pr_info("IOCTL: Block %u content displayed for multi-slice file (inode %lu, size %lld, slices %u)\n", 
+	pr_info("IOCTL: Block %u content displayed for multi-slice file (inode %lu, size %lld, slices %u)\n",
 		block_num, inode->i_ino, inode->i_size, slices_used);
-	
-	pr_info("IOCTL: File uses %u slices starting at slice %u in block %u\n", 
+
+	pr_info("IOCTL: File uses %u slices starting at slice %u in block %u\n",
 		slices_used, slice_num, block_num);
 
 	/* Verify and display metadata */
@@ -1143,7 +1247,7 @@ static long ouichefs_display_block_ioctl(struct file *file, unsigned long arg)
 		pr_info("IOCTL: Block metadata - Magic:0x%08X Bitmap:0x%08X Next:%u\n",
 			le32_to_cpu(meta->magic), bitmap, next_block);
 	} else {
-		pr_warn("IOCTL: Block metadata has invalid magic number: 0x%08X\n", 
+		pr_warn("IOCTL: Block metadata has invalid magic number (not sliced): 0x%08X\n",
 			le32_to_cpu(meta->magic));
 	}
 
@@ -1152,10 +1256,11 @@ free_display_data:
 	return ret;
 }
 
-/**
+/*
  * IOCTL dispatcher
  */
-static long ouichefs_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+static long ouichefs_ioctl(struct file *file, unsigned int cmd,
+			   unsigned long arg)
 {
 	switch (cmd) {
 	case OUICHEFS_IOC_DISPLAY_BLOCK:
@@ -1165,15 +1270,16 @@ static long ouichefs_ioctl(struct file *file, unsigned int cmd, unsigned long ar
 	}
 }
 
-/**
+/*
  * Compatibility IOCTL for 32-bit applications on 64-bit systems
  */
-#ifdef CONFIG_COMPAT
-static long ouichefs_compat_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+/*#ifdef CONFIG_COMPAT
+static long ouichefs_compat_ioctl(struct file *file, unsigned int cmd,
+				  unsigned long arg)
 {
 	return ouichefs_ioctl(file, cmd, arg);
 }
-#endif
+#endif*/
 
 const struct file_operations ouichefs_file_ops = {
 	.owner = THIS_MODULE,
@@ -1182,10 +1288,9 @@ const struct file_operations ouichefs_file_ops = {
 	.read = ouichefs_read,
 	.write = ouichefs_write,
 	.unlocked_ioctl = ouichefs_ioctl,
-#ifdef CONFIG_COMPAT
+	/*#ifdef CONFIG_COMPAT
 	.compat_ioctl = ouichefs_compat_ioctl,
-#endif
-	// legacy functions -> remove later
+#endif*/
 	.read_iter = generic_file_read_iter,
 	.write_iter = generic_file_write_iter,
 	.fsync = generic_file_fsync,

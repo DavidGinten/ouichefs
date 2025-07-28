@@ -7,9 +7,9 @@
 
 #define pr_fmt(fmt) "%s:%s: " fmt, KBUILD_MODNAME, __func__
 
-#include <linux/module.h>
-#include <linux/kernel.h>
 #include <linux/fs.h>
+#include <linux/kernel.h>
+#include <linux/module.h>
 
 #include "ouichefs.h"
 
@@ -19,18 +19,11 @@
 struct dentry *ouichefs_mount(struct file_system_type *fs_type, int flags,
 			      const char *dev_name, void *data)
 {
-	// This is the struct dentry * for the root of the mounted filesystem
-	// and returns a struct block_device *bdev. It checks whether
-	// a superblock for this device already exists and either reuses
-	// or creates a new one. Then ouichefs_fill_super is called
-	// with the superblock to finish setup. (e.g. Allocates and
-	// initializes the root inode)
 	struct dentry *dentry = NULL;
 	struct super_block *sb;
 	char partition_name[32];
 	const char *dev_basename;
 
-	// mount_bdev() opens the device like /dev/sdX
 	dentry =
 		mount_bdev(fs_type, flags, dev_name, data, ouichefs_fill_super);
 	if (IS_ERR(dentry)) {
@@ -53,17 +46,10 @@ struct dentry *ouichefs_mount(struct file_system_type *fs_type, int flags,
 	/* Create safe partition name for sysfs */
 	snprintf(partition_name, sizeof(partition_name), "%.20s", dev_basename);
 
-	/* Replace any invalid characters with underscores
-	char *p = partition_name;
-	while (*p) {
-		if (!isalnum(*p) && *p != '_' && *p != '-')
-			*p = '_';
-		p++;
-	}*/
-
 	if (ouichefs_sysfs_create_partition(sb, partition_name)) {
-		pr_warn("Failed to create sysfs interface for %s\n", partition_name);
-		/* Don't fail the mount for sysfs errors */
+		/* We don't need to fail the mount for sysfs errors */
+		pr_warn("Failed to create sysfs interface for %s\n",
+			partition_name);
 	}
 
 	return dentry;

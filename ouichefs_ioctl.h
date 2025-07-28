@@ -5,7 +5,8 @@
 
 /* IOCTL command definitions */
 #define OUICHEFS_IOC_MAGIC 'O'
-#define OUICHEFS_IOC_DISPLAY_BLOCK _IOR(OUICHEFS_IOC_MAGIC, 1, struct ouichefs_block_display)
+#define OUICHEFS_IOC_DISPLAY_BLOCK \
+	_IOR(OUICHEFS_IOC_MAGIC, 1, struct ouichefs_block_display)
 
 /* Structure for block display data */
 struct ouichefs_block_display {

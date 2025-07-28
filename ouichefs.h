@@ -119,7 +119,8 @@ extern const struct address_space_operations ouichefs_aops;
 /* sysfs functions */
 int ouichefs_sysfs_init(void);
 void ouichefs_sysfs_exit(void);
-int ouichefs_sysfs_create_partition(struct super_block *sb, const char *partition_name);
+int ouichefs_sysfs_create_partition(struct super_block *sb,
+				    const char *partition_name);
 void ouichefs_sysfs_remove_partition(struct super_block *sb);
 void ouichefs_sysfs_set_sb(struct super_block *sb);
 void ouichefs_sysfs_clear_sb(void);
