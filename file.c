@@ -324,6 +324,120 @@ static int ouichefs_open(struct inode *inode, struct file *file)
 }
 
 /*
+ * Enhanced read function supporting multi-slice files
+ */
+static ssize_t ouichefs_read(struct file *file, char __user *buf, size_t len,
+			     loff_t *pos)
+{
+	struct inode *inode = file->f_inode;
+	struct super_block *sb = inode->i_sb;
+	struct ouichefs_inode_info *ci = OUICHEFS_INODE(inode);
+
+	if (*pos >= inode->i_size)
+		return 0; // EOF
+
+	/* Check if this is a small file using slice storage */
+	if (ouichefs_uses_slice_storage(inode)) {
+		uint32_t block_num = ouichefs_get_slice_block(ci->index_block);
+		uint32_t slice_start =
+			ouichefs_get_slice_number(ci->index_block);
+		uint32_t slices_used = ouichefs_slices_needed(inode->i_size);
+
+		char *kbuf = kmalloc(len, GFP_KERNEL);
+
+		if (!kbuf)
+			return -ENOMEM;
+
+		size_t bytes_to_read = min(len, (size_t)(inode->i_size - *pos));
+		ssize_t ret = ouichefs_read_slices(sb, block_num, slice_start,
+						   slices_used, kbuf,
+						   bytes_to_read);
+
+		if (ret > 0) {
+			if (copy_to_user(buf, kbuf + *pos, ret)) {
+				kfree(kbuf);
+				return -EFAULT;
+			}
+			*pos += ret;
+		}
+
+		kfree(kbuf);
+		pr_debug("Read %zd bytes from multi-slice file at pos %lld\n",
+			 ret, *pos - ret);
+		return ret;
+	}
+
+	/* Traditional file handling (existing code for large files) */
+	struct buffer_head *bh, *bh_index;
+	struct ouichefs_file_index_block *index;
+	unsigned long block_num;
+	unsigned long block_offset;
+	unsigned long bytes_in_block;
+	unsigned long bytes_left;
+	unsigned long bytes_avail;
+	unsigned long to_copy;
+	size_t total_copied = 0;
+
+	char *kbuf = kmalloc(len, GFP_KERNEL);
+
+	if (!kbuf)
+		return -ENOMEM;
+
+	bh_index = sb_bread(sb, ci->index_block);
+	if (!bh_index) {
+		kfree(kbuf);
+		return -EIO;
+	}
+	index = (struct ouichefs_file_index_block *)bh_index->b_data;
+
+	while (total_copied < len) {
+		block_num = *pos / OUICHEFS_BLOCK_SIZE;
+		block_offset = *pos % OUICHEFS_BLOCK_SIZE;
+
+		if (block_num >= OUICHEFS_MAX_SUBFILES)
+			break;
+
+		uint32_t bno = le32_to_cpu(index->blocks[block_num]);
+
+		if (bno == 0)
+			break;
+
+		bh = sb_bread(sb, bno);
+		if (!bh) {
+			brelse(bh_index);
+			kfree(kbuf);
+			return -EIO;
+		}
+
+		bytes_in_block = OUICHEFS_BLOCK_SIZE - block_offset;
+		bytes_left = len - total_copied;
+		bytes_avail = inode->i_size - *pos;
+
+		to_copy = min3(bytes_in_block, bytes_left, bytes_avail);
+
+		memcpy(kbuf + total_copied, bh->b_data + block_offset, to_copy);
+
+		brelse(bh);
+
+		*pos += to_copy;
+		total_copied += to_copy;
+
+		if (*pos >= inode->i_size)
+			break;
+	}
+
+	if (copy_to_user(buf, kbuf, total_copied)) {
+		kfree(kbuf);
+		brelse(bh_index);
+		return -EFAULT;
+	}
+
+	kfree(kbuf);
+	brelse(bh_index);
+	return total_copied;
+}
+
+/*
  * Enhanced write function supporting multi-slice files
  */
 static ssize_t ouichefs_write(struct file *file, const char __user *buf,
@@ -1203,6 +1317,7 @@ const struct file_operations ouichefs_file_ops = {
 	.open = ouichefs_open,
 	.llseek = generic_file_llseek,
 	.write = ouichefs_write,
+	.read = ouichefs_read,
 	.unlocked_ioctl = ouichefs_ioctl,
 	.read_iter = generic_file_read_iter,
 	.write_iter = generic_file_write_iter,
