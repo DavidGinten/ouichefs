@@ -1073,11 +1073,137 @@ static void ouichefs_free_traditional_blocks(struct inode *inode)
 	pr_debug("Freed traditional index block %u\n", ci->index_block);
 }
 
+/* IOCTL implementation */
+#include "ouichefs_ioctl.h"
+
+/*
+ * IOCTL handler for displaying block content
+ */
+static long ouichefs_display_block_ioctl(struct file *file, unsigned long arg)
+{
+	struct inode *inode = file_inode(file);
+	struct super_block *sb = inode->i_sb;
+	struct ouichefs_inode_info *ci = OUICHEFS_INODE(inode);
+	struct ouichefs_block_display __user *user_data;
+	struct ouichefs_block_display *display_data;
+	struct buffer_head *bh;
+	struct ouichefs_sliced_block_meta *meta;
+	uint32_t block_num, slice_num;
+	char *block_data;
+	int i, ret = 0;
+
+	/* Check if this is a regular file */
+	if (!S_ISREG(inode->i_mode)) {
+		pr_err("IOCTL: File is not a regular file\n");
+		return -EINVAL;
+	}
+
+	/* Check if file is small enough to use sliced storage */
+	if (inode->i_size > OUICHEFS_SMALL_FILE_THRESHOLD) {
+		pr_err("IOCTL: File size (%lld) exceeds slice storage limit (%u bytes)\n",
+		       inode->i_size, OUICHEFS_SMALL_FILE_THRESHOLD);
+		return -EINVAL;
+	}
+
+	/* Check if file is not empty */
+	if (ci->index_block == 0) {
+		pr_err("IOCTL: File has no storage allocated\n");
+		return -ENODATA;
+	}
+
+	/* Extract slice information */
+	block_num = ouichefs_get_slice_block(ci->index_block);
+	slice_num = ouichefs_get_slice_number(ci->index_block);
+
+	/* Validate slice information */
+	if (block_num == 0 || slice_num == 0 ||
+	    slice_num >= OUICHEFS_SLICES_PER_BLOCK) {
+		pr_err("IOCTL: Invalid slice info - block:%u slice:%u\n",
+		       block_num, slice_num);
+		return -EINVAL;
+	}
+
+	/* Allocate memory for display data */
+	display_data =
+		kmalloc(sizeof(struct ouichefs_block_display), GFP_KERNEL);
+	if (!display_data)
+		return -ENOMEM;
+
+	/* Read the block from disk */
+	bh = sb_bread(sb, block_num);
+	if (!bh) {
+		pr_err("IOCTL: Failed to read block %u\n", block_num);
+		ret = -EIO;
+		goto free_display_data;
+	}
+
+	block_data = bh->b_data;
+	display_data->block_number = block_num;
+
+	/* Copy all slices from the block */
+	for (i = 0; i < OUICHEFS_SLICES_PER_BLOCK; i++) {
+		memcpy(display_data->slices[i],
+		       block_data + (i * OUICHEFS_SLICE_SIZE),
+		       OUICHEFS_SLICE_SIZE);
+	}
+
+	brelse(bh);
+
+	/* Copy data to user space */
+	user_data = (struct ouichefs_block_display __user *)arg;
+	if (copy_to_user(user_data, display_data,
+			 sizeof(struct ouichefs_block_display))) {
+		ret = -EFAULT;
+		goto free_display_data;
+	}
+
+	/* Print debug information to kernel log */
+	uint32_t slices_used = ouichefs_slices_needed(inode->i_size);
+
+	pr_info("IOCTL: Block %u content displayed for multi-slice file (inode %lu, size %lld, slices %u)\n",
+		block_num, inode->i_ino, inode->i_size, slices_used);
+
+	pr_info("IOCTL: File uses %u slices starting at slice %u in block %u\n",
+		slices_used, slice_num, block_num);
+
+	/* Verify and display metadata */
+	meta = (struct ouichefs_sliced_block_meta *)display_data->slices[0];
+	if (le32_to_cpu(meta->magic) == OUICHEFS_SLICED_MAGIC) {
+		uint32_t bitmap = le32_to_cpu(meta->slice_bitmap);
+		uint32_t next_block = le32_to_cpu(meta->next_block);
+
+		pr_info("IOCTL: Block metadata - Magic:0x%08X Bitmap:0x%08X Next:%u\n",
+			le32_to_cpu(meta->magic), bitmap, next_block);
+	} else {
+		pr_warn("IOCTL: Block metadata has invalid magic number (not sliced): 0x%08X\n",
+			le32_to_cpu(meta->magic));
+	}
+
+free_display_data:
+	kfree(display_data);
+	return ret;
+}
+
+/*
+ * IOCTL dispatcher
+ */
+static long ouichefs_ioctl(struct file *file, unsigned int cmd,
+			   unsigned long arg)
+{
+	switch (cmd) {
+	case OUICHEFS_IOC_DISPLAY_BLOCK:
+		return ouichefs_display_block_ioctl(file, arg);
+	default:
+		return -ENOTTY;
+	}
+}
+
 const struct file_operations ouichefs_file_ops = {
 	.owner = THIS_MODULE,
 	.open = ouichefs_open,
 	.llseek = generic_file_llseek,
 	.write = ouichefs_write,
+	.unlocked_ioctl = ouichefs_ioctl,
 	.read_iter = generic_file_read_iter,
 	.write_iter = generic_file_write_iter,
 	.fsync = generic_file_fsync,
