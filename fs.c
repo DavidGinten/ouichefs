@@ -7,9 +7,9 @@
 
 #define pr_fmt(fmt) "%s:%s: " fmt, KBUILD_MODNAME, __func__
 
-#include <linux/module.h>
-#include <linux/kernel.h>
 #include <linux/fs.h>
+#include <linux/kernel.h>
+#include <linux/module.h>
 
 #include "ouichefs.h"
 
@@ -20,13 +20,37 @@ struct dentry *ouichefs_mount(struct file_system_type *fs_type, int flags,
 			      const char *dev_name, void *data)
 {
 	struct dentry *dentry = NULL;
+	struct super_block *sb;
+	char partition_name[32];
+	const char *dev_basename;
 
 	dentry =
 		mount_bdev(fs_type, flags, dev_name, data, ouichefs_fill_super);
-	if (IS_ERR(dentry))
+	if (IS_ERR(dentry)) {
 		pr_err("'%s' mount failure\n", dev_name);
+		return dentry;
+	}
+
+	pr_info("'%s' mount success\n", dev_name);
+
+	/* Create sysfs entries for this partition */
+	sb = dentry->d_sb;
+
+	/* Extract partition name from device name */
+	dev_basename = strrchr(dev_name, '/');
+	if (dev_basename)
+		dev_basename++; /* Skip the '/' */
 	else
-		pr_info("'%s' mount success\n", dev_name);
+		dev_basename = dev_name;
+
+	/* Create safe partition name for sysfs */
+	snprintf(partition_name, sizeof(partition_name), "%.20s", dev_basename);
+
+	if (ouichefs_sysfs_create_partition(sb, partition_name)) {
+		/* We don't need to fail the mount for sysfs errors */
+		pr_warn("Failed to create sysfs interface for %s\n",
+			partition_name);
+	}
 
 	return dentry;
 }
@@ -36,6 +60,9 @@ struct dentry *ouichefs_mount(struct file_system_type *fs_type, int flags,
  */
 void ouichefs_kill_sb(struct super_block *sb)
 {
+	/* Remove sysfs entries for this specific superblock */
+	ouichefs_sysfs_remove_partition(sb);
+
 	kill_block_super(sb);
 
 	pr_info("unmounted disk\n");
@@ -60,6 +87,12 @@ static int __init ouichefs_init(void)
 		goto err;
 	}
 
+	ret = ouichefs_sysfs_init();
+	if (ret) {
+		pr_err("sysfs initialization failed\n");
+		goto err_sysfs;
+	}
+
 	ret = register_filesystem(&ouichefs_file_system_type);
 	if (ret) {
 		pr_err("register_filesystem() failed\n");
@@ -71,6 +104,8 @@ static int __init ouichefs_init(void)
 
 err_inode:
 	ouichefs_destroy_inode_cache();
+err_sysfs:
+	ouichefs_sysfs_exit();
 err:
 	return ret;
 }
@@ -83,6 +118,7 @@ static void __exit ouichefs_exit(void)
 	if (ret)
 		pr_err("unregister_filesystem() failed\n");
 
+	ouichefs_sysfs_exit();
 	ouichefs_destroy_inode_cache();
 
 	pr_info("module unloaded\n");
