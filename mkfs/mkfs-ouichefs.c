@@ -20,6 +20,18 @@
 #define OUICHEFS_FILENAME_LEN 28
 #define OUICHEFS_MAX_SUBFILES 128
 
+/* Sliced block constants */
+#define OUICHEFS_SLICE_SIZE 128
+#define OUICHEFS_SLICES_PER_BLOCK 32
+#define OUICHEFS_DATA_SLICES_PER_BLOCK 31 /* 32 - 1 for metadata */
+#define OUICHEFS_SMALL_FILE_THRESHOLD \
+	(OUICHEFS_SLICE_SIZE * OUICHEFS_DATA_SLICES_PER_BLOCK)
+
+/* Masks for index_block field when used for sliced blocks */
+#define OUICHEFS_SLICE_BLOCK_MASK 0x07FFFFFF /* 27 bits for block number */
+#define OUICHEFS_SLICE_NUM_MASK 0xF8000000 /* 5 bits for slice number */
+#define OUICHEFS_SLICE_NUM_SHIFT 27
+
 struct ouichefs_inode {
 	mode_t i_mode; /* File mode */
 	uint32_t i_uid; /* Owner id */
@@ -33,7 +45,8 @@ struct ouichefs_inode {
 	uint64_t i_nmtime; /* Modification time (nsec) */
 	uint32_t i_blocks; /* Block count (subdir count for directories) */
 	uint32_t i_nlink; /* Hard links count */
-	uint32_t index_block; /* Block with list of blocks for this file */
+	/* Block with list of blocks for this file OR slice info for small files */
+	uint32_t index_block;
 };
 
 #define OUICHEFS_INODES_PER_BLOCK \
@@ -52,7 +65,10 @@ struct ouichefs_superblock {
 	uint32_t nr_free_inodes; /* Number of free inodes */
 	uint32_t nr_free_blocks; /* Number of free blocks */
 
-	char padding[4064]; /* Padding to match block size */
+	uint32_t s_free_sliced_blocks; /* First block in list of partially filled sliced blocks */
+
+	/* Padding to match block size (reduced by 4 bytes for s_free_sliced_blocks) */
+	char padding[4060];
 };
 
 struct ouichefs_file_index_block {
@@ -116,6 +132,7 @@ static struct ouichefs_superblock *write_superblock(int fd,
 	sb->nr_bfree_blocks = htole32(nr_bfree_blocks);
 	sb->nr_free_inodes = htole32(nr_inodes - 1);
 	sb->nr_free_blocks = htole32(nr_data_blocks - 1);
+	sb->s_free_sliced_blocks = htole32(0);
 
 	ret = write(fd, sb, sizeof(struct ouichefs_superblock));
 	if (ret != sizeof(struct ouichefs_superblock)) {
@@ -130,12 +147,20 @@ static struct ouichefs_superblock *write_superblock(int fd,
 	       "\tnr_ifree_blocks=%u\n"
 	       "\tnr_bfree_blocks=%u\n"
 	       "\tnr_free_inodes=%u\n"
-	       "\tnr_free_blocks=%u\n",
+	       "\tnr_free_blocks=%u\n"
+	       "\ts_free_sliced_blocks=%u\n"
+	       "Sliced block info:\n"
+	       "\tslice_size=%u bytes\n"
+	       "\tslices_per_block=%u\n"
+	       "\tdata_slices_per_block=%u\n"
+	       "\tsmall_file_threshold=%u bytes\n",
 	       sizeof(struct ouichefs_superblock), le32toh(sb->magic),
-		   le32toh(sb->nr_blocks), le32toh(sb->nr_inodes),
-		   le32toh(sb->nr_istore_blocks),
-		   le32toh(sb->nr_ifree_blocks), le32toh(sb->nr_bfree_blocks),
-		   le32toh(sb->nr_free_inodes), le32toh(sb->nr_free_blocks));
+	       le32toh(sb->nr_blocks), le32toh(sb->nr_inodes),
+	       le32toh(sb->nr_istore_blocks), le32toh(sb->nr_ifree_blocks),
+	       le32toh(sb->nr_bfree_blocks), le32toh(sb->nr_free_inodes),
+	       le32toh(sb->nr_free_blocks), le32toh(sb->s_free_sliced_blocks),
+	       OUICHEFS_SLICE_SIZE, OUICHEFS_SLICES_PER_BLOCK,
+	       OUICHEFS_DATA_SLICES_PER_BLOCK, OUICHEFS_SMALL_FILE_THRESHOLD);
 
 	return sb;
 }
@@ -322,20 +347,45 @@ end:
 static int write_data_blocks(int fd, struct ouichefs_superblock *sb)
 {
 	int ret = 0;
-	/* struct ouichefs_dir_block root_block; */
-	/* struct ouichefs_file_index_block foo_block; */
-	/* char *foo; */
-	/* uint32_t first_block = le32toh(sb->nr_istore_blocks) + */
-	/* 	le32toh(sb->nr_ifree_blocks) + le32toh(sb->nr_bfree_blocks) + 3; */
+	struct ouichefs_dir_block *root_block;
+	uint32_t first_data_block;
 
-	/* foo = malloc(OUICHEFS_BLOCK_SIZE); */
-	/* if (!foo) */
-	/* 	return -1; */
-	/* memset(foo, 0, OUICHEFS_BLOCK_SIZE); */
+	/* Calculate the first data block number */
+	first_data_block = 1 + le32toh(sb->nr_istore_blocks) +
+			   le32toh(sb->nr_ifree_blocks) +
+			   le32toh(sb->nr_bfree_blocks) +
+			   1; /* +1 for root index block */
 
-	/* end: */
-	/* 	free(foo); */
+	/* Allocate and initialize root directory block */
+	root_block = malloc(OUICHEFS_BLOCK_SIZE);
 
+	if (!root_block)
+		return -1;
+
+	memset(root_block, 0, OUICHEFS_BLOCK_SIZE);
+
+	/* Set up "." entry (current directory) */
+	root_block->files[0].inode = htole32(1); /* Root inode is 1 */
+	strncpy(root_block->files[0].filename, ".", OUICHEFS_FILENAME_LEN);
+
+	/* Set up ".." entry (parent directory - same as root for root dir) */
+	root_block->files[1].inode = htole32(1); /* Root inode is 1 */
+	strncpy(root_block->files[1].filename, "..", OUICHEFS_FILENAME_LEN);
+
+	/* Write the root directory block */
+	ret = write(fd, root_block, OUICHEFS_BLOCK_SIZE);
+
+	if (ret != OUICHEFS_BLOCK_SIZE) {
+		ret = -1;
+		goto end;
+	}
+	ret = 0;
+
+	printf("Root directory block: wrote 1 block at block %u\n",
+	       first_data_block);
+
+end:
+	free(root_block);
 	return ret;
 }
 
@@ -405,6 +455,9 @@ int main(int argc, char **argv)
 		goto fclose;
 	}
 
+	printf("Creating ouichefs filesystem with sliced block support\n");
+	printf("Partition size: %lu bytes\n", partition_size);
+
 	/* Write superblock (block 0) */
 	sb = write_superblock(fd, partition_size);
 	if (!sb) {
@@ -452,6 +505,9 @@ int main(int argc, char **argv)
 		ret = EXIT_FAILURE;
 		goto free_sb;
 	}
+
+	printf("\nFilesystem created successfully!\n");
+	printf("Ready for mounting with ouichefs kernel module.\n");
 
 free_sb:
 	free(sb);

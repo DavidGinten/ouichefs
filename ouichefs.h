@@ -49,7 +49,8 @@ struct ouichefs_inode {
 	__le64 i_nmtime; /* Modification time (nsec) */
 	__le32 i_blocks; /* Block count */
 	__le32 i_nlink; /* Hard links count */
-	__le32 index_block; /* Block with list of blocks for this file */
+	/* Block with list of blocks for this file or slice location for small files */
+	__le32 index_block;
 };
 
 struct ouichefs_inode_info {
@@ -72,6 +73,8 @@ struct ouichefs_sb_info {
 
 	uint32_t nr_free_inodes; /* Number of free inodes */
 	uint32_t nr_free_blocks; /* Number of free blocks */
+
+	uint32_t s_free_sliced_blocks; /* First block in list of partially filled sliced blocks */
 
 	unsigned long *ifree_bitmap; /* In-memory free inodes bitmap */
 	unsigned long *bfree_bitmap; /* In-memory free blocks bitmap */
